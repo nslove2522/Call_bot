@@ -117,10 +117,16 @@ async function sendVoiceCall(recipient, campaign) {
   const answerUrl = `${process.env.BASE_URL || 'http://example.com'}/api/plivo/answer?recipient_id=${recipient.id}`;
   console.log('Creating Plivo call', { to: recipient.phone_number, recipientId: recipient.id, answerUrl });
   try {
+    const options = {
+      answer_method: 'GET',
+      hangup_url: `${process.env.BASE_URL || 'http://example.com'}/api/plivo/webhook`,
+      hangup_method: 'POST'
+    };
     const res = await plivoClient.calls.create(
       PLIVO_SOURCE_NUMBER,
       recipient.phone_number,
-      [answerUrl]
+      answerUrl,
+      options
     );
     console.log('Plivo call create response:', res);
     // attempt to extract uuid
