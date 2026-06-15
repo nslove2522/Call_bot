@@ -1,0 +1,11 @@
+node_modules
+npm-debug.log
+.env
+.env.local
+.vscode
+.idea
+.DS_Store
+tmp
+data
+uploads
+*.log

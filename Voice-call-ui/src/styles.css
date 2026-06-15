@@ -1,0 +1,7 @@
+body{font-family: Arial, sans-serif; padding:16px}
+.login, .campaign-create { max-width:480px; margin:12px 0; padding:12px; border:1px solid #ddd}
+label{display:block;margin-bottom:8px}
+input, textarea, select{width:100%;padding:6px;margin-top:4px}
+button{margin-top:8px;padding:8px 12px}
+table{width:100%;border-collapse:collapse;margin-top:12px}
+td,th{border:1px solid #ddd;padding:6px}
