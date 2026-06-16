@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import Login from './components/Login'
 import Dashboard from './components/Dashboard'
+import logo from './assets/logo.svg'
 
 export default function App(){
   const [token, setToken] = useState(() => {
@@ -22,7 +23,7 @@ export default function App(){
 
   return (
     <div>
-      <div className="global-header">VADIVEL INDANE GAS AGENCY</div>
+      <div className="global-header"><img src={logo} className="global-logo" alt="VADIVEL"/><span>VADIVEL INDANE GAS AGENCY</span></div>
       {!token ? <Login onLogin={(t) => setToken(t)} /> : <Dashboard token={token} onLogout={handleLogout} />}
     </div>
   )
