@@ -3,7 +3,7 @@ import { authHeader } from '../api'
 
 export default function Login({ onLogin }){
   const [user, setUser] = useState('admin')
-  const [pass, setPass] = useState('changeme')
+  const [pass, setPass] = useState('admin')
   const [err, setErr] = useState(null)
 
   function handleLogin(e){

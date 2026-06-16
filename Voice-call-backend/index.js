@@ -32,7 +32,34 @@ if (!fs.existsSync(path.join(__dirname, 'tmp'))) fs.mkdirSync(path.join(__dirnam
 // ensure uploads directory and serve static files for voice files
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
+// Custom middleware to disable Range requests for audio files (Plivo compatibility)
+app.use('/uploads', (req, res, next) => {
+  if (req.path.endsWith('.mp3') || req.path.endsWith('.wav')) {
+    res.set('Accept-Ranges', 'none');
+    res.set('Cache-Control', 'no-cache, public');
+  }
+  next();
+});
+
 app.use('/uploads', express.static(UPLOADS_DIR));
+
+app.post('/api/uploads', basicAuth, upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const sanitized = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const filename = `${Date.now()}-${sanitized}`;
+    const destPath = path.join(UPLOADS_DIR, filename);
+    fs.renameSync(req.file.path, destPath);
+    const baseUrl = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+    const url = `${baseUrl}/uploads/${filename}`;
+    console.log('/api/uploads file saved', { filename, destPath, url });
+    res.json({ url });
+  } catch (err) {
+    console.error('/api/uploads error', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // request logging
 app.use(morgan('combined'));
@@ -41,15 +68,37 @@ const PORT = process.env.PORT || 3001;
 
 function basicAuth(req, res, next) {
   const auth = req.headers['authorization'];
-  if (!auth || !auth.startsWith('Basic ')) return res.status(401).send('Unauthorized');
+  console.log('basicAuth check', { path: req.path, method: req.method, authHeader: auth ? auth.substring(0, 20) + '...' : 'MISSING', adminUser: process.env.ADMIN_USER, adminPass: process.env.ADMIN_PASS });
+  if (!auth || !auth.startsWith('Basic ')) {
+    console.log('basicAuth failed: missing or invalid header format');
+    return res.status(401).send('Unauthorized');
+  }
   const encoded = auth.split(' ')[1];
   const decoded = Buffer.from(encoded, 'base64').toString('utf8');
   const [user, pass] = decoded.split(':');
-  if (user === process.env.ADMIN_USER && pass === process.env.ADMIN_PASS) return next();
+  console.log('basicAuth decoded', { user, pass, expectedUser: process.env.ADMIN_USER, expectedPass: process.env.ADMIN_PASS });
+  if (user === process.env.ADMIN_USER && pass === process.env.ADMIN_PASS) {
+    console.log('basicAuth SUCCESS');
+    return next();
+  }
+  console.log('basicAuth failed: credentials do not match');
   return res.status(401).send('Unauthorized');
 }
 
 app.get('/', (req, res) => res.send('Voice call backend running'));
+
+app.get('/test-upload', async (req, res) => {
+  try {
+    const files = fs.readdirSync(UPLOADS_DIR);
+    const baseUrl = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+    res.json({
+      uploadDir: UPLOADS_DIR,
+      files: files.map(f => ({ name: f, url: `${baseUrl}/uploads/${f}` }))
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.post('/api/campaigns', basicAuth, async (req, res) => {
   const { name, type, message_text, voice_url, retry_delay_minutes, max_attempts } = req.body;
@@ -240,7 +289,7 @@ app.all('/api/plivo/answer', async (req, res) => {
   const tts = req.query.tts || req.body && req.body.tts;
   if (!recipientId) return res.status(400).send('missing recipient_id');
   try {
-    console.log('/api/plivo/answer incoming request', { method: req.method, ip: req.ip, headers: req.headers, query: req.query, body: req.body });
+    console.log('/api/plivo/answer incoming request', { method: req.method, ip: req.ip, query: req.query });
     const recipient = await getAsync(`SELECT * FROM recipients WHERE id = ?`, [recipientId]);
     if (!recipient) {
       console.warn(`/api/plivo/answer recipient ${recipientId} not found - returning default Speak to avoid Plivo error`);
@@ -249,25 +298,27 @@ app.all('/api/plivo/answer', async (req, res) => {
       return res.send(xml);
     }
     const campaign = await getAsync(`SELECT * FROM campaigns WHERE id = ?`, [recipient.campaign_id]);
+    console.log('/api/plivo/answer campaign data', { recipientId, campaignId: recipient.campaign_id, campaign });
+    
     // If caller explicitly requests TTS (for debugging), return <Speak>
     if (tts === '1' || tts === 'true') {
       const text = (campaign && campaign.message_text) ? campaign.message_text : 'Hello';
       const xml = `<?xml version="1.0" encoding="UTF-8"?><Response><Speak>${text}</Speak></Response>`;
-      console.log('/api/plivo/answer returning Speak XML (forced by tts param)', { recipientId, text, xml });
+      console.log('/api/plivo/answer returning Speak XML (forced by tts param)', { recipientId, text });
       res.set('Content-Type', 'application/xml');
       return res.send(xml);
     }
 
     if (campaign && campaign.voice_url) {
       const xml = `<?xml version="1.0" encoding="UTF-8"?><Response><Play>${campaign.voice_url}</Play></Response>`;
-      console.log('/api/plivo/answer returning Play XML', { recipientId, voice_url: campaign.voice_url, xml });
+      console.log('/api/plivo/answer returning Play XML', { recipientId, voice_url: campaign.voice_url, xmlLength: xml.length });
       res.set('Content-Type', 'application/xml');
       return res.send(xml);
     }
 
     const text = (campaign && campaign.message_text) ? campaign.message_text : 'Hello';
     const xml = `<?xml version="1.0" encoding="UTF-8"?><Response><Speak>${text}</Speak></Response>`;
-    console.log('/api/plivo/answer returning Speak XML', { recipientId, text, xml });
+    console.log('/api/plivo/answer returning Speak XML (fallback)', { recipientId, text });
     res.set('Content-Type', 'application/xml');
     res.send(xml);
   } catch (err) {

@@ -4,10 +4,13 @@ const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001'
 
 export function authHeader(user, pass){
   const token = btoa(`${user}:${pass}`)
-  return { Authorization: `Basic ${token}` }
+  const header = { Authorization: `Basic ${token}` }
+  console.log('authHeader generated', { user, pass, token: token.substring(0, 10) + '...', header })
+  return header
 }
 
 export async function createCampaign(auth, body){
+  console.log('createCampaign calling with auth', auth)
   return axios.post(`${API_BASE}/api/campaigns`, body, { headers: auth })
 }
 
