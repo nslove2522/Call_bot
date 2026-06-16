@@ -35,9 +35,8 @@ export default function App(){
               {!token ? <Login onLogin={(t) => setToken(t)} /> : <Dashboard token={token} onLogout={handleLogout} />}
             </div>
           )
-        })()
-      }
-      {!token ? <Login onLogin={(t) => setToken(t)} /> : <Dashboard token={token} onLogout={handleLogout} />}
-    </div>
+          })()
+        }
+      </div>
   )
 }
