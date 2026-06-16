@@ -23,6 +23,11 @@ td,th{border:1px solid #ddd;padding:6px}
 	.login, .campaign-create{padding:16px}
 }
 
+/* subtle gas cylinder background watermark applied via CSS variable set in App.jsx */
+.app-root{position:relative}
+.app-root .login-wrapper::before{content:'';position:absolute;inset:0;display:block;background-image:var(--bg-url);background-repeat:no-repeat;background-position:center 60px;background-size:40%;opacity:0.06;pointer-events:none;z-index:0}
+.app-root > *{position:relative;z-index:1}
+
 /* fixed logout button visible on all screens */
 .fixed-logout{position:fixed;right:18px;bottom:18px;z-index:1200;background:#fff;color:#b71c1c;border:2px solid #b71c1c;padding:8px 14px;border-radius:24px;cursor:pointer;box-shadow:0 6px 18px rgba(15,23,42,0.08)}
 .fixed-logout:hover{background:#fff9f9}

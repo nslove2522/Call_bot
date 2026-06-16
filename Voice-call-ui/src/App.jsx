@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import Login from './components/Login'
 import Dashboard from './components/Dashboard'
 import logo from './assets/logo.svg'
+import gasBg from './assets/gas-bg.svg'
 
 export default function App(){
   const [token, setToken] = useState(() => {
@@ -27,7 +28,13 @@ export default function App(){
         (() => {
           // allow overriding the header logo via VITE_LOGO_URL env variable (useful to swap with real image)
           const logoUrl = import.meta.env.VITE_LOGO_URL || logo;
-          return <div className="global-header"><img src={logoUrl} className="global-logo" alt="VADIVEL"/><span>VADIVEL INDANE GAS AGENCY</span></div>
+          const bgUrl = import.meta.env.VITE_BG_URL || gasBg;
+          return (
+            <div className="app-root" style={{ ['--bg-url']: `url(${bgUrl})` }}>
+              <div className="global-header"><img src={logoUrl} className="global-logo" alt="VADIVEL"/><span>VADIVEL INDANE GAS AGENCY</span></div>
+              {!token ? <Login onLogin={(t) => setToken(t)} /> : <Dashboard token={token} onLogout={handleLogout} />}
+            </div>
+          )
         })()
       }
       {!token ? <Login onLogin={(t) => setToken(t)} /> : <Dashboard token={token} onLogout={handleLogout} />}
