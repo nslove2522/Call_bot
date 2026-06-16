@@ -21,10 +21,8 @@ export default function Dashboard({ token, onLogout }){
     <div className="dashboard">
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
         <h2>Campaigns</h2>
-        <div>
-          <button onClick={() => { onLogout(); localStorage.removeItem('currentCampaignId') }}>Logout</button>
-        </div>
       </div>
+      <button className="fixed-logout" onClick={() => { onLogout(); localStorage.removeItem('currentCampaignId') }}>Logout</button>
       {campaignId ? (
         <CampaignView token={token} id={campaignId} onBack={()=>setCampaignId(null)} />
       ) : (

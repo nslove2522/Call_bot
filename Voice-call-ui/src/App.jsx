@@ -23,7 +23,13 @@ export default function App(){
 
   return (
     <div>
-      <div className="global-header"><img src={logo} className="global-logo" alt="VADIVEL"/><span>VADIVEL INDANE GAS AGENCY</span></div>
+      {
+        (() => {
+          // allow overriding the header logo via VITE_LOGO_URL env variable (useful to swap with real image)
+          const logoUrl = import.meta.env.VITE_LOGO_URL || logo;
+          return <div className="global-header"><img src={logoUrl} className="global-logo" alt="VADIVEL"/><span>VADIVEL INDANE GAS AGENCY</span></div>
+        })()
+      }
       {!token ? <Login onLogin={(t) => setToken(t)} /> : <Dashboard token={token} onLogout={handleLogout} />}
     </div>
   )
