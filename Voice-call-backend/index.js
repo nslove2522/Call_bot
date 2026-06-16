@@ -74,8 +74,22 @@ const http = require('http');
 function formatToIST(ts) {
   if (!ts) return '';
   try {
-    const s = (typeof ts === 'string' && (ts.endsWith('Z') || ts.includes('T'))) ? ts : (ts + 'Z');
-    const d = new Date(s);
+    // accept numeric epoch (ms) or ISO string or our backfilled 'YYYY-MM-DD HH:MM:SS' strings
+    let d;
+    if (typeof ts === 'number' || (typeof ts === 'string' && /^\d+$/.test(ts))) {
+      d = new Date(Number(ts));
+    } else if (typeof ts === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(ts)) {
+      // this format is stored as IST in older rows (YYYY-MM-DD HH:MM:SS). Parse as IST and convert to Date
+      const parts = ts.split(' ');
+      const dateParts = parts[0].split('-').map(Number);
+      const timeParts = parts[1].split(':').map(Number);
+      // Convert IST (UTC+5:30) to UTC ms: Date.UTC(...) - offset
+      const offsetMs = (5 * 60 + 30) * 60 * 1000;
+      d = new Date(Date.UTC(dateParts[0], dateParts[1] - 1, dateParts[2], timeParts[0], timeParts[1], timeParts[2]) - offsetMs);
+    } else {
+      const s = (typeof ts === 'string' && (ts.endsWith('Z') || ts.includes('T'))) ? ts : (ts + 'Z');
+      d = new Date(s);
+    }
     const opts = { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
     const parts = new Intl.DateTimeFormat('en-GB', opts).formatToParts(d);
     const map = {};
@@ -342,8 +356,9 @@ app.post('/api/plivo/webhook', express.urlencoded({ extended: true }), async (re
           console.error('Error exporting failed recipient to CSV', e);
         }
       } else {
-        // schedule next attempt
-        await runAsync(`UPDATE recipients SET status = ?, next_attempt_at = datetime('now', '+' || ? || ' minutes') WHERE id = ?`, ['retry', retryDelayMinutes, recipient.id]);
+        // schedule next attempt using epoch ms to avoid timezone parsing issues
+        const nextMs = Date.now() + (retryDelayMinutes * 60 * 1000);
+        await runAsync(`UPDATE recipients SET status = ?, next_attempt_at = ? WHERE id = ?`, ['retry', String(nextMs), recipient.id]);
       }
     }
 

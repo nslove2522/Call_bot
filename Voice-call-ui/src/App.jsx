@@ -20,6 +20,10 @@ export default function App(){
     setToken(null)
   }
 
-  if (!token) return <Login onLogin={(t) => setToken(t)} />
-  return <Dashboard token={token} onLogout={handleLogout} />
+  return (
+    <div>
+      <div className="global-header">VADIVEL INDANE GAS AGENCY</div>
+      {!token ? <Login onLogin={(t) => setToken(t)} /> : <Dashboard token={token} onLogout={handleLogout} />}
+    </div>
+  )
 }

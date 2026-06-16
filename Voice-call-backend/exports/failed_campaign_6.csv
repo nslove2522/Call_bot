@@ -1,0 +1,2 @@
+phone_number,status,attempts,last_attempt_at,last_status_detail
++919655449424,failed_permanent,3,2026-06-16 23:14:09,"{""CallUUID"":""f18246dd-a8fd-4f60-b711-6656051da757"",""CallStatus"":""no-answer""}"

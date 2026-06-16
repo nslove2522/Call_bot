@@ -16,18 +16,17 @@ export default function Login({ onLogin }){
     }).catch(e => setErr(e.message))
   }
 
-  // store token to localStorage when parent provides it via onLogin
-  // (parent App will keep localStorage in sync too)
-
   return (
-    <div className="login">
-      <h2>Admin Login</h2>
-      <form onSubmit={handleLogin}>
-        <label>Username<input value={user} onChange={e=>setUser(e.target.value)} /></label>
-        <label>Password<input type="password" value={pass} onChange={e=>setPass(e.target.value)} /></label>
-        <button type="submit">Login</button>
-      </form>
-      {err && <div className="error">{err}</div>}
+    <div className="login-wrapper">
+      <div className="login">
+        <h2>Admin Login</h2>
+        <form onSubmit={handleLogin}>
+          <label>Username<input value={user} onChange={e=>setUser(e.target.value)} /></label>
+          <label>Password<input type="password" value={pass} onChange={e=>setPass(e.target.value)} /></label>
+          <button type="submit">Login</button>
+        </form>
+        {err && <div className="error">{err}</div>}
+      </div>
     </div>
   )
 }
