@@ -47,9 +47,20 @@ export default function CampaignView({ token, id, onBack }){
           <table>
             <thead><tr><th>Phone</th><th>Status</th><th>Attempts</th><th>Last</th></tr></thead>
             <tbody>
-              {status.recipients.map(r=> (
-                <tr key={r.id}><td>{r.phone_number}</td><td>{r.status}</td><td>{r.attempts}</td><td>{r.last_attempt_at}</td></tr>
-              ))}
+              {status.recipients.map(r=> {
+                // SQLite `CURRENT_TIMESTAMP` is stored as UTC (YYYY-MM-DD HH:MM:SS).
+                // Convert to local timezone for display by appending 'Z' to treat as UTC.
+                let last = r.last_attempt_at || '';
+                try {
+                  if (last) {
+                    // if already ISO/Z, parse directly, otherwise treat stored UTC like 'YYYY-MM-DD HH:MM:SS' and append 'Z'
+                    last = new Date(last.endsWith('Z') || last.includes('T') ? last : (last + 'Z')).toLocaleString();
+                  }
+                } catch (e) { /* leave as-is on parse error */ }
+                return (
+                  <tr key={r.id}><td>{r.phone_number}</td><td>{r.status}</td><td>{r.attempts}</td><td>{last}</td></tr>
+                )
+              })}
             </tbody>
           </table>
         </div>

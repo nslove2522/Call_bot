@@ -66,6 +66,47 @@ app.use(morgan('combined'));
 
 const PORT = process.env.PORT || 3001;
 
+// simple diagnostic endpoint to fetch an audio URL and return response headers/status
+const https = require('https');
+const http = require('http');
+
+// helper: format UTC timestamp string to India time (Asia/Kolkata) as 'YYYY-MM-DD HH:MM:SS'
+function formatToIST(ts) {
+  if (!ts) return '';
+  try {
+    const s = (typeof ts === 'string' && (ts.endsWith('Z') || ts.includes('T'))) ? ts : (ts + 'Z');
+    const d = new Date(s);
+    const opts = { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
+    const parts = new Intl.DateTimeFormat('en-GB', opts).formatToParts(d);
+    const map = {};
+    parts.forEach(p => { if (p.type && p.value) map[p.type] = p.value });
+    return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second}`;
+  } catch (e) { return ts }
+}
+
+app.get('/api/check-audio', async (req, res) => {
+  const url = req.query.url;
+  if (!url) return res.status(400).json({ error: 'missing url query param' });
+  try {
+    const client = url.startsWith('https://') ? https : http;
+    const reqOpts = new URL(url);
+    const request = client.request(reqOpts, (resp) => {
+      const headers = resp.headers;
+      const statusCode = resp.statusCode;
+      // respond immediately with headers/status so caller (and Plivo) can validate accessibility
+      res.json({ url, statusCode, headers });
+      // destroy response to avoid downloading body
+      try { resp.destroy(); } catch (e) { /* ignore */ }
+    });
+    request.on('error', (err) => {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    });
+    request.end();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 function basicAuth(req, res, next) {
   const auth = req.headers['authorization'];
   console.log('basicAuth check', { path: req.path, method: req.method, authHeader: auth ? auth.substring(0, 20) + '...' : 'MISSING', adminUser: process.env.ADMIN_USER, adminPass: process.env.ADMIN_PASS });
@@ -103,9 +144,11 @@ app.get('/test-upload', async (req, res) => {
 app.post('/api/campaigns', basicAuth, async (req, res) => {
   const { name, type, message_text, voice_url, retry_delay_minutes, max_attempts } = req.body;
   try {
+    const createdAtIst = formatToIST(new Date().toISOString());
     const r = await runAsync(
-      `INSERT INTO campaigns (name, type, message_text, voice_url, retry_delay_minutes, max_attempts) VALUES (?,?,?,?,?,?)`,
-      [name, type, message_text, voice_url, retry_delay_minutes || 60, max_attempts || 3]
+      `INSERT INTO campaigns (name, type, message_text, voice_url, retry_delay_minutes, max_attempts, created_at) VALUES (?,?,?,?,?,?,?)`,
+      // default retry_delay_minutes: 5 minutes, default max_attempts: 4
+      [name, type, message_text, voice_url, retry_delay_minutes || 5, max_attempts || 4, createdAtIst]
     );
     res.json({ id: r.lastID });
   } catch (err) {
@@ -159,8 +202,9 @@ app.post('/api/campaigns/:id/recipients/upload', basicAuth, upload.single('file'
 async function sendVoiceCall(recipient, campaign) {
   // If plivo configured, create call and store call uuid
   if (!plivoClient) {
-    // simulate
-    await runAsync(`UPDATE recipients SET status = ?, attempts = attempts + 1, last_attempt_at = CURRENT_TIMESTAMP WHERE id = ?`, ['sent', recipient.id]);
+    // simulate: mark sent but do NOT increment attempts here; attempts are incremented on failure
+    const nowIst = formatToIST(new Date().toISOString());
+    await runAsync(`UPDATE recipients SET status = ?, last_attempt_at = ? WHERE id = ?`, ['sent', nowIst, recipient.id]);
     return { simulated: true };
   }
   const answerUrl = `${process.env.BASE_URL || 'http://example.com'}/api/plivo/answer?recipient_id=${recipient.id}`;
@@ -180,11 +224,12 @@ async function sendVoiceCall(recipient, campaign) {
     console.log('Plivo call create response:', res);
     // attempt to extract uuid
     const uuid = res && (res.request_uuid || res.requestUuid || res.request_uuid) ? (res.request_uuid || res.requestUuid || res.request_uuid) : null;
+    const nowIst = formatToIST(new Date().toISOString());
     if (uuid) {
-      await runAsync(`UPDATE recipients SET plivo_call_uuid = ?, status = ?, attempts = attempts + 1, last_attempt_at = CURRENT_TIMESTAMP WHERE id = ?`, [uuid, 'sent', recipient.id]);
+      await runAsync(`UPDATE recipients SET plivo_call_uuid = ?, status = ?, last_attempt_at = ? WHERE id = ?`, [uuid, 'sent', nowIst, recipient.id]);
     } else {
-      // still mark as sent attempt but store response
-      await runAsync(`UPDATE recipients SET status = ?, attempts = attempts + 1, last_status_detail = ? , last_attempt_at = CURRENT_TIMESTAMP WHERE id = ?`, ['sent', JSON.stringify(res), recipient.id]);
+      // still mark as sent but DO NOT increment attempts here; store response
+      await runAsync(`UPDATE recipients SET status = ?, last_status_detail = ? , last_attempt_at = ? WHERE id = ?`, ['sent', JSON.stringify(res), nowIst, recipient.id]);
     }
     return res;
   } catch (err) {
@@ -211,7 +256,9 @@ app.post('/api/recipients/:id/call', basicAuth, async (req, res) => {
 
 async function sendSms(recipient, campaign) {
   if (!plivoClient) {
-    await runAsync(`UPDATE recipients SET status = ?, attempts = attempts + 1, last_attempt_at = CURRENT_TIMESTAMP WHERE id = ?`, ['sent', recipient.id]);
+    // simulated SMS: mark sent but do not increment attempts here
+    const nowIst = formatToIST(new Date().toISOString());
+    await runAsync(`UPDATE recipients SET status = ?, last_attempt_at = ? WHERE id = ?`, ['sent', nowIst, recipient.id]);
     return { simulated: true };
   }
   try {
@@ -220,7 +267,7 @@ async function sendSms(recipient, campaign) {
       recipient.phone_number,
       campaign.message_text || ''
     );
-    await runAsync(`UPDATE recipients SET status = ?, attempts = attempts + 1, last_attempt_at = CURRENT_TIMESTAMP WHERE id = ?`, ['sent', recipient.id]);
+    await runAsync(`UPDATE recipients SET status = ?, last_attempt_at = CURRENT_TIMESTAMP WHERE id = ?`, ['sent', recipient.id]);
     return res;
   } catch (err) {
     console.error('sendSms error', err, recipient);
@@ -263,7 +310,43 @@ app.post('/api/plivo/webhook', express.urlencoded({ extended: true }), async (re
     // find recipient by plivo_call_uuid
     const recipient = await getAsync(`SELECT * FROM recipients WHERE plivo_call_uuid = ?`, [callUuid]);
     if (!recipient) return res.status(404).send('recipient not found');
-    await runAsync(`INSERT INTO call_events (recipient_id, plivo_call_uuid, event_type, details) VALUES (?,?,?,?)`, [recipient.id, callUuid, callStatus, JSON.stringify(event)]);
+    const eventTs = formatToIST(new Date().toISOString());
+    await runAsync(`INSERT INTO call_events (recipient_id, plivo_call_uuid, event_type, details, timestamp) VALUES (?,?,?,?,?)`, [recipient.id, callUuid, callStatus, JSON.stringify(event), eventTs]);
+
+    // load campaign to know retry settings
+    const campaign = await getAsync(`SELECT * FROM campaigns WHERE id = ?`, [recipient.campaign_id]);
+    const maxAttempts = (campaign && campaign.max_attempts) ? parseInt(campaign.max_attempts, 10) : 4;
+    const retryDelayMinutes = (campaign && campaign.retry_delay_minutes) ? parseInt(campaign.retry_delay_minutes, 10) : 5;
+
+    async function markForRetryOrFail() {
+      // increment attempts now (count failure) and write IST last_attempt_at
+      const nowIst = formatToIST(new Date().toISOString());
+      await runAsync(`UPDATE recipients SET attempts = attempts + 1, last_attempt_at = ? WHERE id = ?`, [nowIst, recipient.id]);
+      const updated = await getAsync(`SELECT attempts FROM recipients WHERE id = ?`, [recipient.id]);
+      const attempts = (updated && updated.attempts) ? updated.attempts : 0;
+
+      if (attempts >= maxAttempts) {
+        // mark permanent failure and export to CSV for download
+        await runAsync(`UPDATE recipients SET status = ?, last_status_detail = ? WHERE id = ?`, ['failed_permanent', JSON.stringify(event), recipient.id]);
+        try {
+          // append to CSV in uploads directory
+          const csvPath = path.join(UPLOADS_DIR, `failed_campaign_${recipient.campaign_id}.csv`);
+          const header = 'phone_number,status,attempts,last_attempt_at,last_status_detail\n';
+          const updatedRecipient = await getAsync(`SELECT * FROM recipients WHERE id = ?`, [recipient.id]);
+          const lastAttemptIst = updatedRecipient && updatedRecipient.last_attempt_at ? formatToIST(updatedRecipient.last_attempt_at) : '';
+          const line = `${recipient.phone_number},failed_permanent,${attempts},${lastAttemptIst},"${(JSON.stringify(event)||'').replace(/"/g,'""')}"\n`;
+          if (!fs.existsSync(csvPath)) fs.writeFileSync(csvPath, header);
+          fs.appendFileSync(csvPath, line);
+          console.log('Appended failed recipient to', csvPath);
+        } catch (e) {
+          console.error('Error exporting failed recipient to CSV', e);
+        }
+      } else {
+        // schedule next attempt
+        await runAsync(`UPDATE recipients SET status = ?, next_attempt_at = datetime('now', '+' || ? || ' minutes') WHERE id = ?`, ['retry', retryDelayMinutes, recipient.id]);
+      }
+    }
+
     if (callStatus === 'completed') {
       // mark completed only if full duration; Plivo provides BillDuration
       const bill = parseInt(event.BillDuration || '0', 10);
@@ -271,15 +354,28 @@ app.post('/api/plivo/webhook', express.urlencoded({ extended: true }), async (re
         await runAsync(`UPDATE recipients SET status = ? WHERE id = ?`, ['completed', recipient.id]);
       } else {
         // no answer or 0 seconds
-        await runAsync(`UPDATE recipients SET status = ?, next_attempt_at = datetime('now', '+' || (SELECT retry_delay_minutes FROM campaigns WHERE id = recipients.campaign_id) || ' minutes') WHERE id = ?`, ['retry', recipient.id]);
+        await markForRetryOrFail();
       }
-    } else if (callStatus === 'no-answer' || callStatus === 'busy' || callStatus === 'failed') {
-      await runAsync(`UPDATE recipients SET status = ?, next_attempt_at = datetime('now', '+' || (SELECT retry_delay_minutes FROM campaigns WHERE id = recipients.campaign_id) || ' minutes') WHERE id = ?`, ['retry', recipient.id]);
+    } else if (callStatus === 'no-answer' || callStatus === 'busy' || callStatus === 'failed' || callStatus === 'cancelled' || callStatus === 'canceled') {
+      await markForRetryOrFail();
     }
     res.send('ok');
   } catch (err) {
     console.error('/api/plivo/webhook error', err);
     res.status(500).send(err.message);
+  }
+});
+
+// endpoint to download failed recipients CSV for a campaign
+app.get('/api/campaigns/:id/failed/export', basicAuth, async (req, res) => {
+  const campaignId = req.params.id;
+  try {
+    const csvPath = path.join(UPLOADS_DIR, `failed_campaign_${campaignId}.csv`);
+    if (!fs.existsSync(csvPath)) return res.status(404).json({ error: 'no failed export found' });
+    return res.download(csvPath);
+  } catch (err) {
+    console.error('/api/campaigns/:id/failed/export error', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -333,15 +429,21 @@ app.get('/api/campaigns/:id/export', basicAuth, async (req, res) => {
   const format = (req.query.format || 'csv').toLowerCase();
   try {
     const rows = await allAsync(`SELECT phone_number, status, attempts, last_attempt_at, last_status_detail FROM recipients WHERE campaign_id = ?`, [campaignId]);
+    // convert timestamps to India time for CSV export and JSON
+    const normRows = rows.map(r => ({
+      ...r,
+      last_attempt_at: formatToIST(r.last_attempt_at),
+      next_attempt_at: formatToIST(r.next_attempt_at)
+    }));
     if (format === 'csv') {
       const header = 'phone_number,status,attempts,last_attempt_at,last_status_detail\n';
-      const lines = rows.map(r => `${r.phone_number},${r.status},${r.attempts},${r.last_attempt_at || ''},"${(r.last_status_detail||'').replace(/"/g,'""')}"`).join('\n');
+      const lines = normRows.map(r => `${r.phone_number},${r.status},${r.attempts},${r.last_attempt_at || ''},"${(r.last_status_detail||'').replace(/"/g,'""')}"`).join('\n');
       const csv = header + lines;
       res.setHeader('Content-Disposition', `attachment; filename="campaign_${campaignId}.csv"`);
       res.set('Content-Type', 'text/csv');
       return res.send(csv);
     }
-    res.json(rows);
+    res.json({ campaignId, recipients: normRows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -353,7 +455,12 @@ app.get('/api/campaigns/:id/status', basicAuth, async (req, res) => {
     const campaign = await getAsync(`SELECT * FROM campaigns WHERE id = ?`, [campaignId]);
     if (!campaign) return res.status(404).json({ error: 'campaign not found' });
     const recipients = await allAsync(`SELECT * FROM recipients WHERE campaign_id = ?`, [campaignId]);
-    res.json({ campaign, recipients });
+    const normRecipients = recipients.map(r => ({
+      ...r,
+      last_attempt_at: formatToIST(r.last_attempt_at),
+      next_attempt_at: formatToIST(r.next_attempt_at)
+    }));
+    res.json({ campaign, recipients: normRecipients });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

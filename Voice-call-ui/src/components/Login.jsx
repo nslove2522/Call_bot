@@ -16,6 +16,9 @@ export default function Login({ onLogin }){
     }).catch(e => setErr(e.message))
   }
 
+  // store token to localStorage when parent provides it via onLogin
+  // (parent App will keep localStorage in sync too)
+
   return (
     <div className="login">
       <h2>Admin Login</h2>
