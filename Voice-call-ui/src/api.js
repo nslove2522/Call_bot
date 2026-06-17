@@ -6,41 +6,28 @@ function normalizeAuth(auth) {
   if (!auth) return {};
 
   if (typeof auth === 'string') {
-    const token = auth.startsWith('Basic ') ? auth : `Basic ${auth}`;
-    return { Authorization: token };
+    const clean = auth.trim();
+    if (!clean) return {};
+    return { Authorization: clean.startsWith('Basic ') ? clean : `Basic ${clean}` };
   }
 
   if (typeof auth === 'object') {
-    if (typeof auth.Authorization === 'string') {
-      const token = auth.Authorization.startsWith('Basic ')
-        ? auth.Authorization
-        : `Basic ${auth.Authorization}`;
-      return { ...auth, Authorization: token };
-    }
-
-    if (typeof auth.authorization === 'string') {
-      const token = auth.authorization.startsWith('Basic ')
-        ? auth.authorization
-        : `Basic ${auth.authorization}`;
-      return { ...auth, Authorization: token };
-    }
-
-    if (typeof auth.token === 'string') {
-      const token = auth.token.startsWith('Basic ') ? auth.token : `Basic ${auth.token}`;
-      return { Authorization: token };
+    const candidate = auth.Authorization || auth.authorization || auth.token || auth.authToken;
+    if (typeof candidate === 'string') {
+      const clean = candidate.trim();
+      return { Authorization: clean.startsWith('Basic ') ? clean : `Basic ${clean}` };
     }
   }
 
   return {};
 }
 
-export function authHeader(user, pass) {
-  const token = btoa(`${user}:${pass}`);
-  return { Authorization: `Basic ${token}` };
-}
-
 export function authToken(user, pass) {
   return btoa(`${user}:${pass}`);
+}
+
+export function getApiBase() {
+  return API_BASE;
 }
 
 export async function checkAuth(auth) {

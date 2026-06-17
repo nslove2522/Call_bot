@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { authToken, checkAuth } from '../api';
+import { authToken, checkAuth, getApiBase } from '../api';
 
 export default function Login({ onLogin }) {
   const [username, setUsername] = useState('');
@@ -19,43 +19,56 @@ export default function Login({ onLogin }) {
       if (typeof onLogin === 'function') onLogin(token);
     } catch (err) {
       localStorage.removeItem('authToken');
-      setError('Invalid username/password or backend CORS configuration. Check Render ADMIN_USER, ADMIN_PASS, and CORS_ORIGIN.');
+      const detail = err?.response?.status === 401
+        ? 'Username or password does not match Render ADMIN_USER / ADMIN_PASS.'
+        : err?.message || 'Unable to reach backend.';
+      setError(detail);
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <form className="card" onSubmit={handleSubmit}>
-      <h2>Admin Login</h2>
-      <p>Sign in to manage voice and SMS campaigns.</p>
+    <section className="center-stage">
+      <form className="premium-card login-card" onSubmit={handleSubmit}>
+        <div className="card-kicker">Admin access</div>
+        <h2>Sign in to campaign console</h2>
+        <p className="muted">Manage voice and SMS campaigns from the deployed Render backend.</p>
 
-      {error && <div className="error">{error}</div>}
+        <div className="info-strip">
+          <span>Backend</span>
+          <strong>{getApiBase()}</strong>
+        </div>
 
-      <label>
-        Username
-        <input
-          value={username}
-          onChange={(event) => setUsername(event.target.value)}
-          autoComplete="username"
-          required
-        />
-      </label>
+        {error && <div className="alert error-alert">{error}</div>}
 
-      <label>
-        Password
-        <input
-          type="password"
-          value={password}
-          onChange={(event) => setPassword(event.target.value)}
-          autoComplete="current-password"
-          required
-        />
-      </label>
+        <label className="field">
+          <span>Username</span>
+          <input
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            autoComplete="username"
+            placeholder="admin"
+            required
+          />
+        </label>
 
-      <button type="submit" disabled={loading}>
-        {loading ? 'Signing in...' : 'Login'}
-      </button>
-    </form>
+        <label className="field">
+          <span>Password</span>
+          <input
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            autoComplete="current-password"
+            placeholder="Enter Render ADMIN_PASS"
+            required
+          />
+        </label>
+
+        <button className="primary-button full" type="submit" disabled={loading}>
+          {loading ? 'Signing in...' : 'Login'}
+        </button>
+      </form>
+    </section>
   );
 }

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import CampaignCreate from './CampaignCreate';
 import CampaignView from './CampaignView';
 
-export default function Dashboard({ token, onLogout }) {
+export default function Dashboard({ token }) {
   const [campaignId, setCampaignId] = useState(() => {
     try {
       const value = localStorage.getItem('currentCampaignId');
@@ -22,46 +22,52 @@ export default function Dashboard({ token, onLogout }) {
     }
   }, [campaignId]);
 
-  function logout() {
-    localStorage.removeItem('authToken');
-    localStorage.removeItem('currentCampaignId');
-    if (typeof onLogout === 'function') onLogout();
-  }
-
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h2>Campaigns</h2>
-        <button type="button" onClick={logout}>Logout</button>
+    <section className="workspace-shell">
+      <div className="workspace-header">
+        <div>
+          <div className="eyebrow">Campaigns</div>
+          <h2>{campaignId ? `Campaign #${campaignId}` : 'Create a voice campaign'}</h2>
+          <p className="muted">Upload recipients, start calls, and track delivery results with clearer status diagnostics.</p>
+        </div>
+        {campaignId && (
+          <button className="secondary-button" type="button" onClick={() => setCampaignId(null)}>
+            Back to create
+          </button>
+        )}
       </div>
 
       {campaignId ? (
-        <CampaignView token={token} id={campaignId} onBack={() => setCampaignId(null)} />
+        <CampaignView token={token} id={campaignId} />
       ) : (
-        <>
+        <div className="dashboard-grid">
           <CampaignCreate token={token} onCreated={(id) => setCampaignId(id)} />
 
-          <div style={{ marginTop: 16 }}>
-            <label>
-              Open a campaign by ID
+          <aside className="premium-card helper-card">
+            <div className="card-kicker">Open existing</div>
+            <h3>Jump to campaign</h3>
+            <p className="muted">Use this if you already created a campaign and know its ID.</p>
+            <label className="field">
+              <span>Campaign ID</span>
               <input
                 type="number"
                 min="1"
                 value={manualId}
                 onChange={(event) => setManualId(event.target.value)}
-                placeholder="Campaign ID"
+                placeholder="Example: 2"
               />
             </label>
-            <button
-              type="button"
-              onClick={() => manualId && setCampaignId(Number(manualId))}
-              disabled={!manualId}
-            >
-              Open
+            <button className="secondary-button full" type="button" onClick={() => manualId && setCampaignId(Number(manualId))} disabled={!manualId}>
+              Open campaign
             </button>
-          </div>
-        </>
+
+            <div className="callout">
+              <strong>Call format tip</strong>
+              <span>For Plivo, use E.164 phone numbers like +918056593498. The plus sign matters more than it should, because telephony enjoys tiny rituals.</span>
+            </div>
+          </aside>
+        </div>
       )}
-    </div>
+    </section>
   );
 }
