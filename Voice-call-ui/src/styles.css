@@ -159,3 +159,85 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
   .workspace-header, .app-topbar { align-items: flex-start; flex-direction: column; }
   .helper-card { position: static; }
 }
+
+/* Hotfix V3.1: Hero contrast polish
+   The previous premium hero used white text on a pale page when no background image was configured.
+   This makes the campaign hero a real readable card instead of invisible ghost typography. */
+.app-main {
+  background:
+    radial-gradient(circle at top left, rgba(200, 30, 30, 0.10), transparent 34%),
+    radial-gradient(circle at top right, rgba(37, 99, 235, 0.08), transparent 32%),
+    linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
+}
+
+.workspace-header {
+  width: 100%;
+  margin: 0 0 26px;
+  padding: clamp(22px, 3vw, 34px);
+  border-radius: 30px;
+  color: #ffffff;
+  background:
+    linear-gradient(135deg, rgba(127, 29, 29, 0.98), rgba(185, 28, 28, 0.94) 48%, rgba(153, 27, 27, 0.98)),
+    radial-gradient(circle at 16% 12%, rgba(255,255,255,0.22), transparent 28%);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 24px 70px rgba(127, 29, 29, 0.28);
+}
+
+.workspace-header h2 {
+  color: #ffffff;
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.22);
+}
+
+.workspace-header .muted,
+.workspace-header p,
+.workspace-header .eyebrow {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.workspace-header .eyebrow {
+  font-weight: 900;
+  letter-spacing: 0.18em;
+}
+
+.workspace-header .secondary-button {
+  color: #7f1d1d;
+  background: #ffffff;
+  border-color: rgba(255,255,255,0.5);
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.16);
+}
+
+/* Make all white cards and form areas readable even on glass surfaces. */
+.premium-card,
+.field,
+.upload-panel,
+.info-strip,
+.empty-state,
+.stat-card,
+.campaign-summary div,
+.table-wrap {
+  color: var(--text);
+}
+
+.premium-card h2,
+.premium-card h3,
+.premium-card h4,
+.premium-card label,
+.premium-card .field span {
+  color: #101828;
+}
+
+/* Keep top bar from clipping logout on narrower screens. */
+.app-topbar {
+  gap: 18px;
+  overflow: hidden;
+}
+
+.app-topbar .ghost-button {
+  flex-shrink: 0;
+}
+
+@media (max-width: 920px) {
+  .workspace-header {
+    border-radius: 22px;
+  }
+}
