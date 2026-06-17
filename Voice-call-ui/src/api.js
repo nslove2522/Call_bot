@@ -1,22 +1,77 @@
-import axios from 'axios';
+﻿import axios from 'axios';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001';
 
-function getAuthHeaders(authToken) {
+function normalizeAuthToken(authToken) {
   if (!authToken) {
+    return '';
+  }
+
+  if (typeof authToken === 'string') {
+    return authToken.trim();
+  }
+
+  if (typeof authToken === 'object') {
+    if (typeof authToken.authToken === 'string') {
+      return authToken.authToken.trim();
+    }
+
+    if (typeof authToken.token === 'string') {
+      return authToken.token.trim();
+    }
+
+    if (typeof authToken.Authorization === 'string') {
+      return authToken.Authorization.replace(/^Basic\s+/i, '').trim();
+    }
+
+    if (typeof authToken.authorization === 'string') {
+      return authToken.authorization.replace(/^Basic\s+/i, '').trim();
+    }
+  }
+
+  return '';
+}
+
+function getAuthHeaders(authToken) {
+  const token = normalizeAuthToken(authToken);
+
+  if (!token) {
     return {};
   }
 
-  const authorization = authToken.startsWith('Basic ')
-    ? authToken
-    : `Basic ${authToken}`;
+  const authorization = token.startsWith('Basic ')
+    ? token
+    : `Basic ${token}`;
 
   return {
     Authorization: authorization,
   };
 }
 
-export async function createCampaign(payload, authToken) {
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function resolvePayloadAndToken(firstArg, secondArg) {
+  // Supports both:
+  // createCampaign(payload, authToken)
+  // createCampaign(authToken, payload)
+  if (isObject(firstArg)) {
+    return {
+      payload: firstArg,
+      authToken: secondArg,
+    };
+  }
+
+  return {
+    payload: secondArg,
+    authToken: firstArg,
+  };
+}
+
+export async function createCampaign(firstArg, secondArg) {
+  const { payload, authToken } = resolvePayloadAndToken(firstArg, secondArg);
+
   const res = await axios.post(`${API_BASE}/api/campaigns`, payload, {
     headers: getAuthHeaders(authToken),
   });
