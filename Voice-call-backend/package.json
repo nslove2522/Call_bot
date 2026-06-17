@@ -1,24 +1,28 @@
 {
   "name": "voice-call-backend",
-  "version": "0.1.0",
-  "private": true,
+  "version": "1.0.0",
+  "description": "Voice/SMS campaign backend using Express, Plivo, Supabase Postgres, and Supabase Storage",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "check": "node --check index.js && node --check db.js && node --check scheduler.js"
   },
   "dependencies": {
-    "body-parser": "^1.20.2",
+    "@supabase/supabase-js": "^2.45.4",
+    "axios": "^1.7.7",
+    "body-parser": "^1.20.3",
     "cors": "^2.8.5",
-    "csv-parse": "^5.4.0",
-    "dotenv": "^16.0.3",
-    "express": "^4.18.2",
+    "csv-parse": "^5.5.6",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
     "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.1",
-    "ngrok": "^4.3.3",
     "node-fetch": "^2.7.0",
-    "axios": "^1.4.0",
-    "plivo": "^4.0.0",
-    "sqlite3": "^5.1.6"
+    "pg": "^8.13.1",
+    "plivo": "^4.74.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
   }
 }

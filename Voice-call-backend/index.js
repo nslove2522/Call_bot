@@ -8,12 +8,22 @@ const morgan = require('morgan');
 const { init, runAsync, allAsync, getAsync } = require('./db');
 const path = require('path');
 const fs = require('fs');
+const { createClient } = require('@supabase/supabase-js');
 // start retry scheduler
 try { require('./scheduler'); } catch (e) { console.warn('scheduler not loaded', e.message); }
 
 const PLIVO_AUTH_ID = process.env.PLIVO_AUTH_ID;
 const PLIVO_AUTH_TOKEN = process.env.PLIVO_AUTH_TOKEN;
 const PLIVO_SOURCE_NUMBER = process.env.PLIVO_SOURCE_NUMBER;
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_VOICE_BUCKET = process.env.SUPABASE_VOICE_BUCKET || 'voice-files';
+
+let supabase = null;
+if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
+  supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+}
 
 let plivoClient = null;
 if (PLIVO_AUTH_ID && PLIVO_AUTH_TOKEN) {
@@ -22,7 +32,20 @@ if (PLIVO_AUTH_ID && PLIVO_AUTH_TOKEN) {
 }
 
 const app = express();
-app.use(cors());
+const allowedOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean)
+  : [];
+
+app.use(cors({
+  origin(origin, callback) {
+    // Allow server-to-server calls, curl/Postman, Plivo callbacks, and local dev when CORS_ORIGIN is empty.
+    if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
+}));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
@@ -46,18 +69,41 @@ app.use('/uploads', express.static(UPLOADS_DIR));
 
 app.post('/api/uploads', basicAuth, upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
   try {
+    if (!supabase) {
+      return res.status(500).json({
+        error: 'Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Render.',
+      });
+    }
+
     const sanitized = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
     const filename = `${Date.now()}-${sanitized}`;
-    const destPath = path.join(UPLOADS_DIR, filename);
-    fs.renameSync(req.file.path, destPath);
-    const baseUrl = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-    const url = `${baseUrl}/uploads/${filename}`;
-    console.log('/api/uploads file saved', { filename, destPath, url });
-    res.json({ url });
+    const fileBuffer = fs.readFileSync(req.file.path);
+
+    const { error: uploadError } = await supabase.storage
+      .from(SUPABASE_VOICE_BUCKET)
+      .upload(filename, fileBuffer, {
+        contentType: req.file.mimetype || 'audio/mpeg',
+        upsert: false,
+      });
+
+    try { fs.unlinkSync(req.file.path); } catch (cleanupError) { console.warn('Temporary upload cleanup failed:', cleanupError.message); }
+
+    if (uploadError) {
+      console.error('/api/uploads Supabase upload error', uploadError);
+      return res.status(500).json({ error: uploadError.message });
+    }
+
+    const { data } = supabase.storage
+      .from(SUPABASE_VOICE_BUCKET)
+      .getPublicUrl(filename);
+
+    console.log('/api/uploads file uploaded to Supabase Storage', { filename, bucket: SUPABASE_VOICE_BUCKET, url: data.publicUrl });
+    return res.json({ url: data.publicUrl, path: filename, bucket: SUPABASE_VOICE_BUCKET });
   } catch (err) {
     console.error('/api/uploads error', err);
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -123,22 +169,36 @@ app.get('/api/check-audio', async (req, res) => {
 
 function basicAuth(req, res, next) {
   const auth = req.headers['authorization'];
-  console.log('basicAuth check', { path: req.path, method: req.method, authHeader: auth ? auth.substring(0, 20) + '...' : 'MISSING', adminUser: process.env.ADMIN_USER, adminPass: process.env.ADMIN_PASS });
+
   if (!auth || !auth.startsWith('Basic ')) {
-    console.log('basicAuth failed: missing or invalid header format');
     return res.status(401).send('Unauthorized');
   }
-  const encoded = auth.split(' ')[1];
-  const decoded = Buffer.from(encoded, 'base64').toString('utf8');
-  const [user, pass] = decoded.split(':');
-  console.log('basicAuth decoded', { user, pass, expectedUser: process.env.ADMIN_USER, expectedPass: process.env.ADMIN_PASS });
-  if (user === process.env.ADMIN_USER && pass === process.env.ADMIN_PASS) {
-    console.log('basicAuth SUCCESS');
-    return next();
+
+  try {
+    const encoded = auth.split(' ')[1];
+    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+    const separatorIndex = decoded.indexOf(':');
+
+    if (separatorIndex === -1) {
+      return res.status(401).send('Unauthorized');
+    }
+
+    const user = decoded.slice(0, separatorIndex);
+    const pass = decoded.slice(separatorIndex + 1);
+
+    if (user === process.env.ADMIN_USER && pass === process.env.ADMIN_PASS) {
+      return next();
+    }
+
+    return res.status(401).send('Unauthorized');
+  } catch (err) {
+    return res.status(401).send('Unauthorized');
   }
-  console.log('basicAuth failed: credentials do not match');
-  return res.status(401).send('Unauthorized');
 }
+
+app.get('/api/auth/check', basicAuth, (req, res) => {
+  res.json({ ok: true, message: 'Authenticated' });
+});
 
 app.get('/', (req, res) => res.send('Voice call backend running'));
 
@@ -158,11 +218,11 @@ app.get('/test-upload', async (req, res) => {
 app.post('/api/campaigns', basicAuth, async (req, res) => {
   const { name, type, message_text, voice_url, retry_delay_minutes, max_attempts } = req.body;
   try {
-    const createdAtIst = formatToIST(new Date().toISOString());
+    const createdAt = new Date().toISOString();
     const r = await runAsync(
-      `INSERT INTO campaigns (name, type, message_text, voice_url, retry_delay_minutes, max_attempts, created_at) VALUES (?,?,?,?,?,?,?)`,
+      `INSERT INTO campaigns (name, type, message_text, voice_url, retry_delay_minutes, max_attempts, created_at) VALUES (?,?,?,?,?,?,?) RETURNING id`,
       // default retry_delay_minutes: 5 minutes, default max_attempts: 4
-      [name, type, message_text, voice_url, retry_delay_minutes || 5, max_attempts || 4, createdAtIst]
+      [name, type, message_text, voice_url, retry_delay_minutes || 5, max_attempts || 4, createdAt]
     );
     res.json({ id: r.lastID });
   } catch (err) {
@@ -187,7 +247,7 @@ app.post('/api/campaigns/:id/recipients/upload', basicAuth, upload.single('file'
         for (const row of records) {
           const num = row[0];
           try {
-            const r = await runAsync(`INSERT INTO recipients (campaign_id, phone_number) VALUES (?,?)`, [campaignId, num]);
+            const r = await runAsync(`INSERT INTO recipients (campaign_id, phone_number) VALUES (?,?) RETURNING id`, [campaignId, num]);
             inserted.push({ id: r.lastID, phone_number: num });
           } catch (e) {
             console.error('Insert recipient error', e, row);
@@ -200,7 +260,7 @@ app.post('/api/campaigns/:id/recipients/upload', basicAuth, upload.single('file'
       const numbers = Array.isArray(req.body.numbers) ? req.body.numbers : [];
       const inserted = [];
       for (const num of numbers) {
-        const r = await runAsync(`INSERT INTO recipients (campaign_id, phone_number) VALUES (?,?)`, [campaignId, num]);
+        const r = await runAsync(`INSERT INTO recipients (campaign_id, phone_number) VALUES (?,?) RETURNING id`, [campaignId, num]);
         inserted.push({ id: r.lastID, phone_number: num });
       }
       res.json({ inserted: inserted.length });
@@ -357,8 +417,8 @@ app.post('/api/plivo/webhook', express.urlencoded({ extended: true }), async (re
         }
       } else {
         // schedule next attempt using epoch ms to avoid timezone parsing issues
-        const nextMs = Date.now() + (retryDelayMinutes * 60 * 1000);
-        await runAsync(`UPDATE recipients SET status = ?, next_attempt_at = ? WHERE id = ?`, ['retry', String(nextMs), recipient.id]);
+        const nextAttemptAt = new Date(Date.now() + (retryDelayMinutes * 60 * 1000)).toISOString();
+        await runAsync(`UPDATE recipients SET status = ?, next_attempt_at = ? WHERE id = ?`, ['retry', nextAttemptAt, recipient.id]);
       }
     }
 

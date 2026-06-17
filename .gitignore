@@ -1,2 +1,9 @@
-/Voice-call-backend/node_modules
-/Voice-call-backend/package-lock.json
+﻿node_modules/
+.env
+.env.local
+dist/
+Voice-call-backend/data/
+Voice-call-backend/uploads/
+Voice-call-backend/tmp/
+Voice-call-backend/exports/
+Voice-call-ui/dist/

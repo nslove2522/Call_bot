@@ -1,32 +1,78 @@
-import React, { useState } from 'react'
-import { authHeader } from '../api'
+import React, { useState } from 'react';
 
-export default function Login({ onLogin }){
-  const [user, setUser] = useState('admin')
-  const [pass, setPass] = useState('admin')
-  const [err, setErr] = useState(null)
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001';
 
-  function handleLogin(e){
-    e.preventDefault()
-    const h = authHeader(user, pass)
-    // simple test call
-    fetch(`${import.meta.env.VITE_API_BASE || 'http://localhost:3001'}/`, { headers: h }).then(r => {
-      if (r.ok) onLogin(h)
-      else setErr('auth failed')
-    }).catch(e => setErr(e.message))
+export default function Login({ onLogin }) {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setError('');
+    setLoading(true);
+
+    try {
+      const token = btoa(`${username}:${password}`);
+      const response = await fetch(`${API_BASE}/api/auth/check`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Basic ${token}`,
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error('Invalid username or password');
+      }
+
+      localStorage.setItem('authToken', token);
+
+      if (typeof onLogin === 'function') {
+        onLogin(token);
+      }
+    } catch (err) {
+      localStorage.removeItem('authToken');
+      setError(err.message || 'Login failed');
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
-    <div className="login-wrapper">
-      <div className="login">
+    <div className="login-container">
+      <form className="login-card" onSubmit={handleSubmit}>
         <h2>Admin Login</h2>
-        <form onSubmit={handleLogin}>
-          <label>Username<input value={user} onChange={e=>setUser(e.target.value)} /></label>
-          <label>Password<input type="password" value={pass} onChange={e=>setPass(e.target.value)} /></label>
-          <button type="submit">Login</button>
-        </form>
-        {err && <div className="error">{err}</div>}
-      </div>
+        <p className="muted">Sign in to manage voice and SMS campaigns.</p>
+
+        {error && <div className="error-message">{error}</div>}
+
+        <label>
+          Username
+          <input
+            type="text"
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            autoComplete="username"
+            required
+          />
+        </label>
+
+        <label>
+          Password
+          <input
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            autoComplete="current-password"
+            required
+          />
+        </label>
+
+        <button type="submit" disabled={loading}>
+          {loading ? 'Signing in...' : 'Login'}
+        </button>
+      </form>
     </div>
-  )
+  );
 }

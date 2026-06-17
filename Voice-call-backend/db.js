@@ -1,79 +1,49 @@
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
-const fs = require('fs');
+const { Pool } = require('pg');
 
-const DB_FILE = process.env.DATABASE_FILE || path.join(__dirname, 'data', 'db.sqlite');
+const connectionString = process.env.DATABASE_URL;
 
-function ensureDbDir() {
-  const dir = path.dirname(DB_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+if (!connectionString) {
+  throw new Error('DATABASE_URL is required. Add your Supabase Postgres connection string in Render.');
 }
 
-ensureDbDir();
+const pool = new Pool({
+  connectionString,
+  ssl: process.env.PGSSLMODE === 'disable' ? false : { rejectUnauthorized: false },
+});
 
-const db = new sqlite3.Database(DB_FILE);
-
-function runAsync(sql, params=[]) {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function(err) {
-      if (err) return reject(err);
-      resolve(this);
-    });
-  });
+function toPostgresSql(sql) {
+  let index = 0;
+  return sql.replace(/\?/g, () => `$${++index}`);
 }
 
-function allAsync(sql, params=[]) {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) return reject(err);
-      resolve(rows);
-    });
-  });
+async function runAsync(sql, params = []) {
+  const result = await pool.query(toPostgresSql(sql), params);
+  return {
+    lastID: result.rows && result.rows[0] ? result.rows[0].id : undefined,
+    rowCount: result.rowCount,
+    rows: result.rows,
+  };
 }
 
-function getAsync(sql, params=[]) {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) return reject(err);
-      resolve(row);
-    });
-  });
+async function allAsync(sql, params = []) {
+  const result = await pool.query(toPostgresSql(sql), params);
+  return result.rows;
+}
+
+async function getAsync(sql, params = []) {
+  const result = await pool.query(toPostgresSql(sql), params);
+  return result.rows[0];
 }
 
 async function init() {
-  await runAsync(`CREATE TABLE IF NOT EXISTS campaigns (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT,
-    type TEXT,
-    message_text TEXT,
-    voice_url TEXT,
-    retry_delay_minutes INTEGER DEFAULT 60,
-    max_attempts INTEGER DEFAULT 3,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )`);
-
-  await runAsync(`CREATE TABLE IF NOT EXISTS recipients (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    campaign_id INTEGER,
-    phone_number TEXT,
-    status TEXT DEFAULT 'pending',
-    attempts INTEGER DEFAULT 0,
-    last_attempt_at DATETIME,
-    next_attempt_at DATETIME,
-    last_status_detail TEXT,
-    plivo_call_uuid TEXT,
-    FOREIGN KEY(campaign_id) REFERENCES campaigns(id)
-  )`);
-
-  await runAsync(`CREATE TABLE IF NOT EXISTS call_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    recipient_id INTEGER,
-    plivo_call_uuid TEXT,
-    event_type TEXT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    details TEXT,
-    FOREIGN KEY(recipient_id) REFERENCES recipients(id)
-  )`);
+  await pool.query('select 1');
+  console.log('Supabase Postgres connection OK');
 }
 
-module.exports = { db, runAsync, allAsync, getAsync, init, DB_FILE };
+module.exports = {
+  pool,
+  init,
+  runAsync,
+  allAsync,
+  getAsync,
+};
