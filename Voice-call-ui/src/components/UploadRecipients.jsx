@@ -1,28 +1,44 @@
-import React, { useState } from 'react'
-import { uploadRecipients } from '../api'
+import React, { useState } from 'react';
+import { uploadRecipients } from '../api';
 
-export default function UploadRecipients({ token, campaignId, onUploaded }){
-  const [file, setFile] = useState(null)
-  const [msg, setMsg] = useState(null)
+function getResponseData(response) {
+  return response && response.data ? response.data : response;
+}
 
-  async function handleUpload(e){
-    e.preventDefault()
-    if (!file) return setMsg('choose file')
+export default function UploadRecipients({ token, campaignId, onUploaded }) {
+  const [file, setFile] = useState(null);
+  const [msg, setMsg] = useState(null);
+  const [uploading, setUploading] = useState(false);
+
+  async function handleUpload(event) {
+    event.preventDefault();
+    setMsg(null);
+
+    if (!file) {
+      setMsg('Choose a CSV file first.');
+      return;
+    }
+
+    setUploading(true);
     try {
-      const res = await uploadRecipients(token, campaignId, file)
-      setMsg(`Inserted ${res.data.inserted}`)
-      if (onUploaded) onUploaded(res.data)
-    } catch (err) { setMsg(err.message) }
+      const response = await uploadRecipients(token, campaignId, file);
+      const data = getResponseData(response);
+      setMsg(`Inserted ${data.inserted || 0} recipient(s).`);
+      if (typeof onUploaded === 'function') onUploaded(data);
+    } catch (error) {
+      setMsg(error?.response?.data?.error || error.message || 'Upload failed');
+    } finally {
+      setUploading(false);
+    }
   }
 
   return (
-    <div className="upload">
+    <form onSubmit={handleUpload}>
       <h4>Upload Recipients (CSV)</h4>
-      <form onSubmit={handleUpload}>
-        <input type="file" accept=".csv" onChange={e=>setFile(e.target.files[0])} />
-        <button type="submit">Upload</button>
-      </form>
-      {msg && <div className="msg">{msg}</div>}
-    </div>
-  )
+      <p>Use one phone number per row. Example: 919876543210</p>
+      <input type="file" accept=".csv,text/csv" onChange={(event) => setFile(event.target.files?.[0] || null)} />
+      <button type="submit" disabled={uploading}>{uploading ? 'Uploading...' : 'Upload'}</button>
+      {msg && <div>{msg}</div>}
+    </form>
+  );
 }

@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
-
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001';
+import { authToken, checkAuth } from '../api';
 
 export default function Login({ onLogin }) {
   const [username, setUsername] = useState('');
@@ -14,65 +13,49 @@ export default function Login({ onLogin }) {
     setLoading(true);
 
     try {
-      const token = btoa(`${username}:${password}`);
-      const response = await fetch(`${API_BASE}/api/auth/check`, {
-        method: 'GET',
-        headers: {
-          Authorization: `Basic ${token}`,
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error('Invalid username or password');
-      }
-
-      localStorage.setItem('authToken', token);
-
-      if (typeof onLogin === 'function') {
-        onLogin(token);
-      }
+      const token = authToken(username.trim(), password);
+      await checkAuth(token);
+      localStorage.setItem('authToken', JSON.stringify(token));
+      if (typeof onLogin === 'function') onLogin(token);
     } catch (err) {
       localStorage.removeItem('authToken');
-      setError(err.message || 'Login failed');
+      setError('Invalid username/password or backend CORS configuration. Check Render ADMIN_USER, ADMIN_PASS, and CORS_ORIGIN.');
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div className="login-container">
-      <form className="login-card" onSubmit={handleSubmit}>
-        <h2>Admin Login</h2>
-        <p className="muted">Sign in to manage voice and SMS campaigns.</p>
+    <form className="card" onSubmit={handleSubmit}>
+      <h2>Admin Login</h2>
+      <p>Sign in to manage voice and SMS campaigns.</p>
 
-        {error && <div className="error-message">{error}</div>}
+      {error && <div className="error">{error}</div>}
 
-        <label>
-          Username
-          <input
-            type="text"
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
-            autoComplete="username"
-            required
-          />
-        </label>
+      <label>
+        Username
+        <input
+          value={username}
+          onChange={(event) => setUsername(event.target.value)}
+          autoComplete="username"
+          required
+        />
+      </label>
 
-        <label>
-          Password
-          <input
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            autoComplete="current-password"
-            required
-          />
-        </label>
+      <label>
+        Password
+        <input
+          type="password"
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
+          autoComplete="current-password"
+          required
+        />
+      </label>
 
-        <button type="submit" disabled={loading}>
-          {loading ? 'Signing in...' : 'Login'}
-        </button>
-      </form>
-    </div>
+      <button type="submit" disabled={loading}>
+        {loading ? 'Signing in...' : 'Login'}
+      </button>
+    </form>
   );
 }

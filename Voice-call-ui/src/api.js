@@ -1,141 +1,99 @@
-﻿import axios from 'axios';
+import axios from 'axios';
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001';
+const API_BASE = (import.meta.env.VITE_API_BASE || 'http://localhost:3001').replace(/\/$/, '');
 
-function normalizeAuthToken(authToken) {
-  if (!authToken) {
-    return '';
+function normalizeAuth(auth) {
+  if (!auth) return {};
+
+  if (typeof auth === 'string') {
+    const token = auth.startsWith('Basic ') ? auth : `Basic ${auth}`;
+    return { Authorization: token };
   }
 
-  if (typeof authToken === 'string') {
-    return authToken.trim();
-  }
-
-  if (typeof authToken === 'object') {
-    if (typeof authToken.authToken === 'string') {
-      return authToken.authToken.trim();
+  if (typeof auth === 'object') {
+    if (typeof auth.Authorization === 'string') {
+      const token = auth.Authorization.startsWith('Basic ')
+        ? auth.Authorization
+        : `Basic ${auth.Authorization}`;
+      return { ...auth, Authorization: token };
     }
 
-    if (typeof authToken.token === 'string') {
-      return authToken.token.trim();
+    if (typeof auth.authorization === 'string') {
+      const token = auth.authorization.startsWith('Basic ')
+        ? auth.authorization
+        : `Basic ${auth.authorization}`;
+      return { ...auth, Authorization: token };
     }
 
-    if (typeof authToken.Authorization === 'string') {
-      return authToken.Authorization.replace(/^Basic\s+/i, '').trim();
-    }
-
-    if (typeof authToken.authorization === 'string') {
-      return authToken.authorization.replace(/^Basic\s+/i, '').trim();
+    if (typeof auth.token === 'string') {
+      const token = auth.token.startsWith('Basic ') ? auth.token : `Basic ${auth.token}`;
+      return { Authorization: token };
     }
   }
 
-  return '';
+  return {};
 }
 
-function getAuthHeaders(authToken) {
-  const token = normalizeAuthToken(authToken);
-
-  if (!token) {
-    return {};
-  }
-
-  const authorization = token.startsWith('Basic ')
-    ? token
-    : `Basic ${token}`;
-
-  return {
-    Authorization: authorization,
-  };
+export function authHeader(user, pass) {
+  const token = btoa(`${user}:${pass}`);
+  return { Authorization: `Basic ${token}` };
 }
 
-function isObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+export function authToken(user, pass) {
+  return btoa(`${user}:${pass}`);
 }
 
-function resolvePayloadAndToken(firstArg, secondArg) {
-  // Supports both:
-  // createCampaign(payload, authToken)
-  // createCampaign(authToken, payload)
-  if (isObject(firstArg)) {
-    return {
-      payload: firstArg,
-      authToken: secondArg,
-    };
-  }
-
-  return {
-    payload: secondArg,
-    authToken: firstArg,
-  };
-}
-
-export async function createCampaign(firstArg, secondArg) {
-  const { payload, authToken } = resolvePayloadAndToken(firstArg, secondArg);
-
-  const res = await axios.post(`${API_BASE}/api/campaigns`, payload, {
-    headers: getAuthHeaders(authToken),
+export async function checkAuth(auth) {
+  return axios.get(`${API_BASE}/api/auth/check`, {
+    headers: normalizeAuth(auth),
   });
-
-  return res.data;
 }
 
-export async function uploadRecipients(campaignId, file, authToken) {
-  const formData = new FormData();
-  formData.append('file', file);
-
-  const res = await axios.post(
-    `${API_BASE}/api/campaigns/${campaignId}/recipients/upload`,
-    formData,
-    {
-      headers: {
-        ...getAuthHeaders(authToken),
-        'Content-Type': 'multipart/form-data',
-      },
-    }
-  );
-
-  return res.data;
+export async function createCampaign(auth, body) {
+  return axios.post(`${API_BASE}/api/campaigns`, body, {
+    headers: normalizeAuth(auth),
+  });
 }
 
-export async function uploadFile(file, authToken) {
-  const formData = new FormData();
-  formData.append('file', file);
+export async function uploadRecipients(auth, campaignId, file) {
+  const fd = new FormData();
+  fd.append('file', file);
 
-  const res = await axios.post(`${API_BASE}/api/uploads`, formData, {
+  return axios.post(`${API_BASE}/api/campaigns/${campaignId}/recipients/upload`, fd, {
     headers: {
-      ...getAuthHeaders(authToken),
+      ...normalizeAuth(auth),
       'Content-Type': 'multipart/form-data',
     },
   });
-
-  return res.data;
 }
 
-export async function startCampaign(campaignId, authToken) {
-  const res = await axios.post(
-    `${API_BASE}/api/campaigns/${campaignId}/start`,
-    {},
-    {
-      headers: getAuthHeaders(authToken),
-    }
-  );
+export async function uploadFile(auth, file) {
+  const fd = new FormData();
+  fd.append('file', file);
 
-  return res.data;
-}
-
-export async function getStatus(campaignId, authToken) {
-  const res = await axios.get(`${API_BASE}/api/campaigns/${campaignId}/status`, {
-    headers: getAuthHeaders(authToken),
+  return axios.post(`${API_BASE}/api/uploads`, fd, {
+    headers: {
+      ...normalizeAuth(auth),
+      'Content-Type': 'multipart/form-data',
+    },
   });
-
-  return res.data;
 }
 
-export async function exportCsv(campaignId, authToken) {
-  const res = await axios.get(`${API_BASE}/api/campaigns/${campaignId}/export`, {
-    headers: getAuthHeaders(authToken),
+export async function startCampaign(auth, campaignId) {
+  return axios.post(`${API_BASE}/api/campaigns/${campaignId}/start`, {}, {
+    headers: normalizeAuth(auth),
+  });
+}
+
+export async function getStatus(auth, campaignId) {
+  return axios.get(`${API_BASE}/api/campaigns/${campaignId}/status`, {
+    headers: normalizeAuth(auth),
+  });
+}
+
+export async function exportCsv(auth, campaignId) {
+  return axios.get(`${API_BASE}/api/campaigns/${campaignId}/export?format=csv`, {
+    headers: normalizeAuth(auth),
     responseType: 'blob',
   });
-
-  return res.data;
 }

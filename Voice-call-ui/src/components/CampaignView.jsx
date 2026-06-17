@@ -1,70 +1,111 @@
-import React, { useState, useEffect } from 'react'
-import { getStatus, startCampaign, exportCsv } from '../api'
-import UploadRecipients from './UploadRecipients'
+import React, { useEffect, useState } from 'react';
+import { exportCsv, getStatus, startCampaign } from '../api';
+import UploadRecipients from './UploadRecipients';
 
-export default function CampaignView({ token, id, onBack }){
-  const [status, setStatus] = useState(null)
-  const [loading, setLoading] = useState(false)
+function getResponseData(response) {
+  return response && response.data ? response.data : response;
+}
 
-  async function load(){
-    setLoading(true)
-    const res = await getStatus(token, id)
-    setStatus(res.data)
-    setLoading(false)
+export default function CampaignView({ token, id, onBack }) {
+  const [status, setStatus] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  async function load() {
+    setLoading(true);
+    setMsg(null);
+    try {
+      const response = await getStatus(token, id);
+      setStatus(getResponseData(response));
+    } catch (error) {
+      setMsg(error?.response?.data?.error || error.message || 'Failed to load campaign.');
+    } finally {
+      setLoading(false);
+    }
   }
 
-  useEffect(()=>{ load() }, [])
+  useEffect(() => {
+    if (id) load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
 
-  async function handleStart(){
-    await startCampaign(token, id)
-    setTimeout(load, 2000)
+  async function handleStart() {
+    setMsg(null);
+    try {
+      const response = await startCampaign(token, id);
+      const data = getResponseData(response);
+      setMsg(`Started ${data.started || 0} pending recipient(s).`);
+      setTimeout(load, 1200);
+    } catch (error) {
+      setMsg(error?.response?.data?.error || error.message || 'Start campaign failed.');
+    }
   }
 
-  async function handleExport(){
-    const blob = (await exportCsv(token, id)).data
-    const url = window.URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `campaign_${id}.csv`
-    a.click()
+  async function handleExport() {
+    try {
+      const response = await exportCsv(token, id);
+      const blob = response && response.data ? response.data : response;
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `campaign_${id}.csv`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      setMsg(error?.response?.data?.error || error.message || 'Export failed.');
+    }
   }
+
+  const recipients = status?.recipients || [];
 
   return (
-    <div>
-      <button onClick={onBack}>Back</button>
+    <div className="card">
+      <button type="button" onClick={onBack}>Back</button>
       <h3>Campaign {id}</h3>
-      <UploadRecipients token={token} campaignId={id} onUploaded={()=>load()} />
-      <div>
-        <button onClick={handleStart}>Start Campaign</button>
-        <button onClick={handleExport}>Export CSV</button>
+
+      <UploadRecipients token={token} campaignId={id} onUploaded={load} />
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <button type="button" onClick={handleStart}>Start Campaign</button>
+        <button type="button" onClick={handleExport}>Export CSV</button>
+        <button type="button" onClick={load}>Refresh</button>
       </div>
+
       {loading && <div>Loading...</div>}
+      {msg && <div>{msg}</div>}
+
       {status && (
-        <div>
+        <>
           <h4>Campaign</h4>
-          <pre>{JSON.stringify(status.campaign,null,2)}</pre>
+          <pre>{JSON.stringify(status.campaign, null, 2)}</pre>
+
           <h4>Recipients</h4>
-          <table>
-            <thead><tr><th>Phone</th><th>Status</th><th>Attempts</th><th>Last</th></tr></thead>
-            <tbody>
-              {status.recipients.map(r=> {
-                // SQLite `CURRENT_TIMESTAMP` is stored as UTC (YYYY-MM-DD HH:MM:SS).
-                // Convert to local timezone for display by appending 'Z' to treat as UTC.
-                let last = r.last_attempt_at || '';
-                try {
-                  if (last) {
-                    // if already ISO/Z, parse directly, otherwise treat stored UTC like 'YYYY-MM-DD HH:MM:SS' and append 'Z'
-                    last = new Date(last.endsWith('Z') || last.includes('T') ? last : (last + 'Z')).toLocaleString();
-                  }
-                } catch (e) { /* leave as-is on parse error */ }
-                return (
-                  <tr key={r.id}><td>{r.phone_number}</td><td>{r.status}</td><td>{r.attempts}</td><td>{last}</td></tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
+          {recipients.length === 0 ? (
+            <p>No recipients uploaded yet.</p>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Phone</th>
+                  <th>Status</th>
+                  <th>Attempts</th>
+                  <th>Last Attempt</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recipients.map((recipient) => (
+                  <tr key={recipient.id}>
+                    <td>{recipient.phone_number}</td>
+                    <td>{recipient.status}</td>
+                    <td>{recipient.attempts}</td>
+                    <td>{recipient.last_attempt_at || ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </>
       )}
     </div>
-  )
+  );
 }
