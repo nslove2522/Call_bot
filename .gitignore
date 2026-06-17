@@ -2,8 +2,14 @@
 .env
 .env.local
 dist/
+Voice-call-backend/node_modules/
+Voice-call-backend/.env
+Voice-call-backend/.env.local
 Voice-call-backend/data/
 Voice-call-backend/uploads/
 Voice-call-backend/tmp/
 Voice-call-backend/exports/
+Voice-call-ui/node_modules/
+Voice-call-ui/.env
+Voice-call-ui/.env.local
 Voice-call-ui/dist/
