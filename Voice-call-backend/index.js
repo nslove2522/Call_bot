@@ -395,6 +395,64 @@ app.get('/api/campaigns', basicAuth, async (req, res) => {
   }
 });
 
+
+app.get('/api/dashboard/waiting-calls', basicAuth, async (req, res) => {
+  try {
+    const rows = await allAsync(
+      `SELECT
+         r.*,
+         c.name AS campaign_name,
+         c.type AS campaign_type,
+         c.status AS campaign_status,
+         c.created_at AS campaign_created_at,
+         c.started_at AS campaign_started_at
+       FROM recipients r
+       JOIN campaigns c ON c.id = r.campaign_id
+       WHERE r.status IN ('pending', 'retry')
+         AND COALESCE(c.status, '') NOT IN ('stopped', 'completed')
+       ORDER BY
+         CASE WHEN r.status = 'retry' THEN 0 ELSE 1 END,
+         r.next_attempt_at ASC NULLS FIRST,
+         r.id ASC`,
+      []
+    );
+
+    const campaignIds = new Set();
+    const waitingCalls = rows.map((row) => {
+      campaignIds.add(String(row.campaign_id));
+      const recipient = normalizeRecipient(row);
+      return {
+        id: row.id,
+        recipient_id: row.id,
+        campaign_id: row.campaign_id,
+        campaign_name: row.campaign_name || `Campaign ${row.campaign_id}`,
+        campaign_type: row.campaign_type || '',
+        campaign_status: row.campaign_status || 'active',
+        campaign_created_at_ist: formatToIndiaTime(row.campaign_created_at),
+        campaign_started_at_ist: formatToIndiaTime(row.campaign_started_at),
+        phone_number: row.phone_number,
+        status: row.status,
+        attempts: row.attempts || 0,
+        last_attempt_at_ist: recipient.last_attempt_at_ist,
+        next_attempt_at_ist: recipient.next_attempt_at_ist,
+        last_status_detail: row.last_status_detail || '',
+      };
+    });
+
+    res.json({
+      waitingCalls,
+      summary: {
+        totalWaitingCalls: waitingCalls.length,
+        campaignsWithWaitingCalls: campaignIds.size,
+      },
+      timezone: INDIA_TIME_ZONE,
+    });
+  } catch (err) {
+    console.error('GET /api/dashboard/waiting-calls error', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/campaigns/:id/recipients/upload', basicAuth, upload.single('file'), async (req, res) => {
   const campaignId = req.params.id;
 

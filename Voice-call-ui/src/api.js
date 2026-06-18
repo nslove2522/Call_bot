@@ -47,6 +47,10 @@ export async function listCampaigns(token) {
   return axios.get(`${API_BASE}/api/campaigns`, { headers: getAuthHeaders(token) });
 }
 
+export async function listWaitingCalls(token) {
+  return axios.get(`${API_BASE}/api/dashboard/waiting-calls`, { headers: getAuthHeaders(token) });
+}
+
 export async function createCampaign(firstArg, secondArg) {
   const { payload, token } = resolvePayloadAndToken(firstArg, secondArg);
   return axios.post(`${API_BASE}/api/campaigns`, payload, { headers: getAuthHeaders(token) });
