@@ -1,49 +1,49 @@
 import React, { useState } from 'react';
 import { uploadRecipients } from '../api';
 
-function getResponseData(response) {
-  return response && response.data ? response.data : response;
-}
-
-export default function UploadRecipients({ token, campaignId, onUploaded }) {
+export default function UploadRecipients({ campaignId, authToken, onUploaded }) {
   const [file, setFile] = useState(null);
-  const [msg, setMsg] = useState(null);
-  const [uploading, setUploading] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
-  async function handleUpload(event) {
-    event.preventDefault();
-    setMsg(null);
+  async function submit(e) {
+    e.preventDefault();
+    if (!file) return;
 
-    if (!file) {
-      setMsg({ type: 'error', text: 'Choose a CSV file first.' });
-      return;
-    }
+    setLoading(true);
+    setMessage('');
+    setError('');
 
-    setUploading(true);
     try {
-      const response = await uploadRecipients(token, campaignId, file);
-      const data = getResponseData(response);
-      setMsg({ type: 'success', text: `Inserted ${data.inserted || 0} recipient(s).` });
-      if (typeof onUploaded === 'function') onUploaded(data);
-    } catch (error) {
-      setMsg({ type: 'error', text: error?.response?.data?.error || error.message || 'Upload failed' });
+      const res = await uploadRecipients(campaignId, file, authToken);
+      setMessage(`Inserted ${res.data.inserted || 0} recipient(s).`);
+      setFile(null);
+      if (onUploaded) onUploaded();
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message);
     } finally {
-      setUploading(false);
+      setLoading(false);
     }
   }
 
   return (
-    <form className="upload-card" onSubmit={handleUpload}>
+    <form className="upload-card" onSubmit={submit}>
       <div>
-        <div className="card-kicker">Recipients</div>
-        <h4>Upload CSV</h4>
-        <p className="muted">Use one phone number per row. Recommended: +918056593498.</p>
+        <span className="eyebrow red">Recipients</span>
+        <h3>Upload CSV</h3>
+        <p className="muted">One phone number per row. Use E.164 format like <strong>+918056593498</strong>.</p>
       </div>
+
       <div className="upload-row">
-        <input type="file" accept=".csv,text/csv" onChange={(event) => setFile(event.target.files?.[0] || null)} />
-        <button className="secondary-button" type="submit" disabled={uploading}>{uploading ? 'Uploading...' : 'Upload'}</button>
+        <input type="file" accept=".csv,text/csv" onChange={(e) => setFile(e.target.files?.[0] || null)} />
+        <button className="btn btn-secondary" type="submit" disabled={!file || loading}>
+          {loading ? 'Uploading...' : 'Upload CSV'}
+        </button>
       </div>
-      {msg && <div className={`alert ${msg.type === 'success' ? 'success-alert' : 'error-alert'}`}>{msg.text}</div>}
+
+      {message && <div className="alert success">{message}</div>}
+      {error && <div className="alert danger">{error}</div>}
     </form>
   );
 }

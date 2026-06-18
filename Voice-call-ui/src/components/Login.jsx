@@ -2,73 +2,53 @@ import React, { useState } from 'react';
 import { authToken, checkAuth, getApiBase } from '../api';
 
 export default function Login({ onLogin }) {
-  const [username, setUsername] = useState('');
+  const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  async function handleSubmit(event) {
-    event.preventDefault();
+  async function submit(e) {
+    e.preventDefault();
     setError('');
     setLoading(true);
 
     try {
-      const token = authToken(username.trim(), password);
+      const token = authToken(username, password);
       await checkAuth(token);
-      localStorage.setItem('authToken', JSON.stringify(token));
-      if (typeof onLogin === 'function') onLogin(token);
+      onLogin(token);
     } catch (err) {
-      localStorage.removeItem('authToken');
-      const detail = err?.response?.status === 401
-        ? 'Username or password does not match Render ADMIN_USER / ADMIN_PASS.'
-        : err?.message || 'Unable to reach backend.';
-      setError(detail);
+      setError(err?.response?.status === 401 ? 'Invalid admin username or password.' : `Login failed: ${err.message}`);
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <section className="center-stage">
-      <form className="premium-card login-card" onSubmit={handleSubmit}>
-        <div className="card-kicker">Admin access</div>
-        <h2>Sign in to campaign console</h2>
-        <p className="muted">Manage voice and SMS campaigns from the deployed Render backend.</p>
+    <div className="login-shell">
+      <div className="login-brand">
+        <div className="brand-mark">◆</div>
+        <p>Voice Campaign Console</p>
+        <h1>Vadivel Indane Gas Agency</h1>
+        <span>Backend: {getApiBase()}</span>
+      </div>
 
-        <div className="info-strip">
-          <span>Backend</span>
-          <strong>{getApiBase()}</strong>
-        </div>
+      <form className="login-card glass-card" onSubmit={submit}>
+        <span className="eyebrow">Secure admin access</span>
+        <h2>Sign in</h2>
+        <p className="muted">Manage voice and SMS campaigns from one polished little command center.</p>
 
-        {error && <div className="alert error-alert">{error}</div>}
+        <label>Username</label>
+        <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" />
 
-        <label className="field">
-          <span>Username</span>
-          <input
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
-            autoComplete="username"
-            placeholder="admin"
-            required
-          />
-        </label>
+        <label>Password</label>
+        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
 
-        <label className="field">
-          <span>Password</span>
-          <input
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            autoComplete="current-password"
-            placeholder="Enter Render ADMIN_PASS"
-            required
-          />
-        </label>
+        {error && <div className="alert danger">{error}</div>}
 
-        <button className="primary-button full" type="submit" disabled={loading}>
+        <button className="btn btn-primary btn-block" disabled={loading} type="submit">
           {loading ? 'Signing in...' : 'Login'}
         </button>
       </form>
-    </section>
+    </div>
   );
 }

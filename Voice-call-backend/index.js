@@ -8,8 +8,18 @@ const morgan = require('morgan');
 const { init, runAsync, allAsync, getAsync } = require('./db');
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
+const http = require('http');
 const { createClient } = require('@supabase/supabase-js');
-// start retry scheduler
+
+let WebSocketTransport = null;
+try {
+  WebSocketTransport = require('ws');
+} catch (err) {
+  WebSocketTransport = null;
+}
+
+// Start retry scheduler after db/env setup. It is intentionally non-fatal.
 try { require('./scheduler'); } catch (e) { console.warn('scheduler not loaded', e.message); }
 
 const PLIVO_AUTH_ID = process.env.PLIVO_AUTH_ID;
@@ -22,7 +32,19 @@ const SUPABASE_VOICE_BUCKET = process.env.SUPABASE_VOICE_BUCKET || 'voice-files'
 
 let supabase = null;
 if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
-  supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+  const options = {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  };
+
+  if (WebSocketTransport) {
+    options.realtime = { transport: WebSocketTransport };
+  }
+
+  supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, options);
 }
 
 let plivoClient = null;
@@ -38,7 +60,6 @@ const allowedOrigins = process.env.CORS_ORIGIN
 
 app.use(cors({
   origin(origin, callback) {
-    // Allow server-to-server calls, curl/Postman, Plivo callbacks, and local dev when CORS_ORIGIN is empty.
     if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
@@ -46,17 +67,18 @@ app.use(cors({
     return callback(new Error(`CORS blocked for origin: ${origin}`));
   },
 }));
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '5mb' }));
 app.use(bodyParser.urlencoded({ extended: true }));
+app.use(morgan('combined'));
 
-const upload = multer({ dest: path.join(__dirname, 'tmp') });
-if (!fs.existsSync(path.join(__dirname, 'tmp'))) fs.mkdirSync(path.join(__dirname, 'tmp'));
-
-// ensure uploads directory and serve static files for voice files
+const PORT = process.env.PORT || 3001;
+const TMP_DIR = path.join(__dirname, 'tmp');
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
+if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
-// Custom middleware to disable Range requests for audio files (Plivo compatibility)
+const upload = multer({ dest: TMP_DIR });
+
 app.use('/uploads', (req, res, next) => {
   if (req.path.endsWith('.mp3') || req.path.endsWith('.wav')) {
     res.set('Accept-Ranges', 'none');
@@ -64,17 +86,233 @@ app.use('/uploads', (req, res, next) => {
   }
   next();
 });
-
 app.use('/uploads', express.static(UPLOADS_DIR));
+
+// The user asked for Asia/Chennai. The valid IANA timezone for Indian Standard Time is Asia/Kolkata.
+const INDIA_TIME_ZONE = process.env.APP_TIME_ZONE || 'Asia/Kolkata';
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function parseStoredDate(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+
+  const text = String(value).trim();
+  if (!text) return null;
+  if (/^\d+$/.test(text)) return new Date(Number(text));
+
+  // Older rows may contain an IST display string. Treat that as IST and convert to a Date.
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text)) {
+    const [datePart, timePart] = text.split(' ');
+    const [year, month, day] = datePart.split('-').map(Number);
+    const [hour, minute, second] = timePart.split(':').map(Number);
+    const offsetMs = (5 * 60 + 30) * 60 * 1000;
+    return new Date(Date.UTC(year, month - 1, day, hour, minute, second) - offsetMs);
+  }
+
+  const normalized = text.endsWith('Z') || text.includes('T') ? text : `${text}Z`;
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function formatToIndiaTime(value) {
+  const date = parseStoredDate(value);
+  if (!date) return '';
+
+  try {
+    const opts = {
+      timeZone: INDIA_TIME_ZONE,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    };
+
+    const parts = new Intl.DateTimeFormat('en-GB', opts).formatToParts(date);
+    const map = {};
+    for (const part of parts) {
+      if (part.type !== 'literal') map[part.type] = part.value;
+    }
+    return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second} IST`;
+  } catch (err) {
+    return String(value);
+  }
+}
+
+function csvEscape(value) {
+  if (value === null || value === undefined) return '';
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  if (/[",\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+
+function normalizePhoneNumber(value) {
+  return String(value || '').trim();
+}
+
+const TERMINAL_RECIPIENT_STATUSES = new Set(['completed', 'failed', 'failed_permanent', 'cancelled']);
+
+function isTerminalRecipient(status) {
+  return TERMINAL_RECIPIENT_STATUSES.has(String(status || '').toLowerCase());
+}
+
+function campaignDisplayStatus(campaign, stats) {
+  const status = String(campaign.status || '').toLowerCase();
+  if (status) return status;
+  if (!stats || stats.total === 0) return 'draft';
+  if (stats.total > 0 && stats.terminal === stats.total) return 'completed';
+  if (stats.running > 0 || stats.waiting > 0) return 'running';
+  return 'draft';
+}
+
+function buildRecipientStats(recipients) {
+  const stats = {
+    total: recipients.length,
+    waiting: 0,
+    pending: 0,
+    retry: 0,
+    running: 0,
+    completed: 0,
+    sent: 0,
+    failed: 0,
+    cancelled: 0,
+    terminal: 0,
+  };
+
+  for (const row of recipients) {
+    const status = String(row.status || 'pending').toLowerCase();
+    if (status === 'pending') stats.pending += 1;
+    if (status === 'retry') stats.retry += 1;
+    if (status === 'pending' || status === 'retry') stats.waiting += 1;
+    if (status === 'sent' || status === 'calling' || status === 'in_progress') stats.running += 1;
+    if (status === 'sent') stats.sent += 1;
+    if (status === 'completed') stats.completed += 1;
+    if (status === 'failed' || status === 'failed_permanent') stats.failed += 1;
+    if (status === 'cancelled') stats.cancelled += 1;
+    if (isTerminalRecipient(status)) stats.terminal += 1;
+  }
+
+  return stats;
+}
+
+function normalizeCampaign(campaign, stats) {
+  if (!campaign) return null;
+  return {
+    ...campaign,
+    status: campaignDisplayStatus(campaign, stats),
+    created_at_ist: formatToIndiaTime(campaign.created_at),
+    started_at_ist: formatToIndiaTime(campaign.started_at),
+    stopped_at_ist: formatToIndiaTime(campaign.stopped_at),
+    completed_at_ist: formatToIndiaTime(campaign.completed_at),
+    timezone: INDIA_TIME_ZONE,
+  };
+}
+
+function normalizeRecipient(recipient) {
+  return {
+    ...recipient,
+    last_attempt_at_ist: formatToIndiaTime(recipient.last_attempt_at),
+    next_attempt_at_ist: formatToIndiaTime(recipient.next_attempt_at),
+  };
+}
+
+async function getCampaignWithRecipients(campaignId) {
+  const campaign = await getAsync(`SELECT * FROM campaigns WHERE id = ?`, [campaignId]);
+  if (!campaign) return null;
+  const recipients = await allAsync(`SELECT * FROM recipients WHERE campaign_id = ? ORDER BY id ASC`, [campaignId]);
+  const stats = buildRecipientStats(recipients);
+  return { campaign, recipients, stats };
+}
+
+async function refreshCampaignCompletion(campaignId) {
+  const bundle = await getCampaignWithRecipients(campaignId);
+  if (!bundle) return null;
+
+  const { campaign, recipients, stats } = bundle;
+  const currentStatus = String(campaign.status || '').toLowerCase();
+
+  if (currentStatus === 'stopped') {
+    return { campaign, recipients, stats };
+  }
+
+  if (stats.total > 0 && stats.terminal === stats.total) {
+    const completedAt = campaign.completed_at || nowIso();
+    await runAsync(
+      `UPDATE campaigns SET status = ?, completed_at = COALESCE(completed_at, ?) WHERE id = ?`,
+      ['completed', completedAt, campaignId]
+    );
+    return getCampaignWithRecipients(campaignId);
+  }
+
+  if ((stats.running > 0 || stats.waiting > 0) && currentStatus !== 'running') {
+    await runAsync(
+      `UPDATE campaigns SET status = ? WHERE id = ?`,
+      ['running', campaignId]
+    );
+    return getCampaignWithRecipients(campaignId);
+  }
+
+  return { campaign, recipients, stats };
+}
+
+function basicAuth(req, res, next) {
+  const auth = req.headers.authorization || req.headers.Authorization;
+  if (!auth || !auth.startsWith('Basic ')) {
+    return res.status(401).send('Unauthorized');
+  }
+
+  try {
+    const encoded = auth.split(' ')[1];
+    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+    const separatorIndex = decoded.indexOf(':');
+    if (separatorIndex === -1) return res.status(401).send('Unauthorized');
+
+    const user = decoded.slice(0, separatorIndex);
+    const pass = decoded.slice(separatorIndex + 1);
+
+    if (user === process.env.ADMIN_USER && pass === process.env.ADMIN_PASS) return next();
+    return res.status(401).send('Unauthorized');
+  } catch (err) {
+    return res.status(401).send('Unauthorized');
+  }
+}
+
+app.get('/', (req, res) => res.send('Voice call backend running'));
+
+app.get('/api/auth/check', basicAuth, (req, res) => {
+  res.json({ ok: true, message: 'Authenticated', timezone: INDIA_TIME_ZONE });
+});
+
+app.get('/api/check-audio', async (req, res) => {
+  const url = req.query.url;
+  if (!url) return res.status(400).json({ error: 'missing url query param' });
+
+  try {
+    const client = url.startsWith('https://') ? https : http;
+    const request = client.request(new URL(url), (resp) => {
+      res.json({ url, statusCode: resp.statusCode, headers: resp.headers });
+      try { resp.destroy(); } catch (err) { /* ignore */ }
+    });
+    request.on('error', (err) => {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    });
+    request.end();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.post('/api/uploads', basicAuth, upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
   try {
     if (!supabase) {
-      return res.status(500).json({
-        error: 'Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Render.',
-      });
+      return res.status(500).json({ error: 'Supabase Storage is not configured.' });
     }
 
     const sanitized = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -95,449 +333,379 @@ app.post('/api/uploads', basicAuth, upload.single('file'), async (req, res) => {
       return res.status(500).json({ error: uploadError.message });
     }
 
-    const { data } = supabase.storage
-      .from(SUPABASE_VOICE_BUCKET)
-      .getPublicUrl(filename);
-
-    console.log('/api/uploads file uploaded to Supabase Storage', { filename, bucket: SUPABASE_VOICE_BUCKET, url: data.publicUrl });
-    return res.json({ url: data.publicUrl, path: filename, bucket: SUPABASE_VOICE_BUCKET });
+    const { data } = supabase.storage.from(SUPABASE_VOICE_BUCKET).getPublicUrl(filename);
+    res.json({ url: data.publicUrl, path: filename, bucket: SUPABASE_VOICE_BUCKET });
   } catch (err) {
     console.error('/api/uploads error', err);
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-// request logging
-app.use(morgan('combined'));
-
-const PORT = process.env.PORT || 3001;
-
-// simple diagnostic endpoint to fetch an audio URL and return response headers/status
-const https = require('https');
-const http = require('http');
-
-// helper: format UTC timestamp string to India time (Asia/Kolkata) as 'YYYY-MM-DD HH:MM:SS'
-function formatToIST(ts) {
-  if (!ts) return '';
-  try {
-    // accept numeric epoch (ms) or ISO string or our backfilled 'YYYY-MM-DD HH:MM:SS' strings
-    let d;
-    if (typeof ts === 'number' || (typeof ts === 'string' && /^\d+$/.test(ts))) {
-      d = new Date(Number(ts));
-    } else if (typeof ts === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(ts)) {
-      // this format is stored as IST in older rows (YYYY-MM-DD HH:MM:SS). Parse as IST and convert to Date
-      const parts = ts.split(' ');
-      const dateParts = parts[0].split('-').map(Number);
-      const timeParts = parts[1].split(':').map(Number);
-      // Convert IST (UTC+5:30) to UTC ms: Date.UTC(...) - offset
-      const offsetMs = (5 * 60 + 30) * 60 * 1000;
-      d = new Date(Date.UTC(dateParts[0], dateParts[1] - 1, dateParts[2], timeParts[0], timeParts[1], timeParts[2]) - offsetMs);
-    } else {
-      const s = (typeof ts === 'string' && (ts.endsWith('Z') || ts.includes('T'))) ? ts : (ts + 'Z');
-      d = new Date(s);
-    }
-    const opts = { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
-    const parts = new Intl.DateTimeFormat('en-GB', opts).formatToParts(d);
-    const map = {};
-    parts.forEach(p => { if (p.type && p.value) map[p.type] = p.value });
-    return `${map.year}-${map.month}-${map.day} ${map.hour}:${map.minute}:${map.second}`;
-  } catch (e) { return ts }
-}
-
-app.get('/api/check-audio', async (req, res) => {
-  const url = req.query.url;
-  if (!url) return res.status(400).json({ error: 'missing url query param' });
-  try {
-    const client = url.startsWith('https://') ? https : http;
-    const reqOpts = new URL(url);
-    const request = client.request(reqOpts, (resp) => {
-      const headers = resp.headers;
-      const statusCode = resp.statusCode;
-      // respond immediately with headers/status so caller (and Plivo) can validate accessibility
-      res.json({ url, statusCode, headers });
-      // destroy response to avoid downloading body
-      try { resp.destroy(); } catch (e) { /* ignore */ }
-    });
-    request.on('error', (err) => {
-      if (!res.headersSent) res.status(500).json({ error: err.message });
-    });
-    request.end();
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-function basicAuth(req, res, next) {
-  const auth = req.headers['authorization'];
-
-  if (!auth || !auth.startsWith('Basic ')) {
-    return res.status(401).send('Unauthorized');
-  }
-
-  try {
-    const encoded = auth.split(' ')[1];
-    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
-    const separatorIndex = decoded.indexOf(':');
-
-    if (separatorIndex === -1) {
-      return res.status(401).send('Unauthorized');
-    }
-
-    const user = decoded.slice(0, separatorIndex);
-    const pass = decoded.slice(separatorIndex + 1);
-
-    if (user === process.env.ADMIN_USER && pass === process.env.ADMIN_PASS) {
-      return next();
-    }
-
-    return res.status(401).send('Unauthorized');
-  } catch (err) {
-    return res.status(401).send('Unauthorized');
-  }
-}
-
-app.get('/api/auth/check', basicAuth, (req, res) => {
-  res.json({ ok: true, message: 'Authenticated' });
-});
-
-app.get('/', (req, res) => res.send('Voice call backend running'));
-
-app.get('/test-upload', async (req, res) => {
-  try {
-    const files = fs.readdirSync(UPLOADS_DIR);
-    const baseUrl = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-    res.json({
-      uploadDir: UPLOADS_DIR,
-      files: files.map(f => ({ name: f, url: `${baseUrl}/uploads/${f}` }))
-    });
-  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 app.post('/api/campaigns', basicAuth, async (req, res) => {
   const { name, type, message_text, voice_url, retry_delay_minutes, max_attempts } = req.body;
+
+  if (!name || !type) return res.status(400).json({ error: 'Campaign name and type are required.' });
+  if (!['voice', 'sms'].includes(String(type).toLowerCase())) return res.status(400).json({ error: 'Campaign type must be voice or sms.' });
+
   try {
-    const createdAt = new Date().toISOString();
-    const r = await runAsync(
-      `INSERT INTO campaigns (name, type, message_text, voice_url, retry_delay_minutes, max_attempts, created_at) VALUES (?,?,?,?,?,?,?) RETURNING id`,
-      // default retry_delay_minutes: 5 minutes, default max_attempts: 4
-      [name, type, message_text, voice_url, retry_delay_minutes || 5, max_attempts || 4, createdAt]
+    const result = await runAsync(
+      `INSERT INTO campaigns (name, type, message_text, voice_url, retry_delay_minutes, max_attempts, created_at, status)
+       VALUES (?,?,?,?,?,?,?,?) RETURNING id`,
+      [name, type, message_text || '', voice_url || '', Number(retry_delay_minutes || 5), Number(max_attempts || 3), nowIso(), 'draft']
     );
-    res.json({ id: r.lastID });
+
+    res.json({ id: result.lastID });
   } catch (err) {
     console.error('POST /api/campaigns error', err);
     res.status(500).json({ error: err.message });
   }
 });
 
+app.get('/api/campaigns', basicAuth, async (req, res) => {
+  try {
+    const campaigns = await allAsync(`SELECT * FROM campaigns ORDER BY created_at DESC, id DESC`, []);
+    const result = [];
+
+    for (const campaign of campaigns) {
+      const recipients = await allAsync(`SELECT status FROM recipients WHERE campaign_id = ?`, [campaign.id]);
+      const stats = buildRecipientStats(recipients);
+      const refreshed = await refreshCampaignCompletion(campaign.id);
+      const latestCampaign = refreshed ? refreshed.campaign : campaign;
+      const latestStats = refreshed ? refreshed.stats : stats;
+      result.push({ campaign: normalizeCampaign(latestCampaign, latestStats), stats: latestStats });
+    }
+
+    const summary = result.reduce((acc, item) => {
+      const status = String(item.campaign.status || '').toLowerCase();
+      acc.total += 1;
+      if (status === 'running') acc.running += 1;
+      else if (status === 'completed') acc.completed += 1;
+      else if (status === 'stopped') acc.stopped += 1;
+      else acc.active += 1;
+      acc.waitingCalls += item.stats.waiting;
+      acc.runningCalls += item.stats.running;
+      acc.completedCalls += item.stats.completed;
+      return acc;
+    }, { total: 0, active: 0, running: 0, completed: 0, stopped: 0, waitingCalls: 0, runningCalls: 0, completedCalls: 0 });
+
+    res.json({ campaigns: result, summary, timezone: INDIA_TIME_ZONE });
+  } catch (err) {
+    console.error('GET /api/campaigns error', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/campaigns/:id/recipients/upload', basicAuth, upload.single('file'), async (req, res) => {
   const campaignId = req.params.id;
-  // Accept CSV file upload or JSON body with numbers array
+
   try {
-    if (req.file) {
-      const filePath = req.file.path;
-      const content = fs.readFileSync(filePath, 'utf8');
-      csvParse(content, { trim: true }, async (err, records) => {
-        if (err) {
-          console.error('CSV parse error', err);
-          return res.status(400).json({ error: err.message });
-        }
-        const inserted = [];
-        for (const row of records) {
-          const num = row[0];
-          try {
-            const r = await runAsync(`INSERT INTO recipients (campaign_id, phone_number) VALUES (?,?) RETURNING id`, [campaignId, num]);
-            inserted.push({ id: r.lastID, phone_number: num });
-          } catch (e) {
-            console.error('Insert recipient error', e, row);
-          }
-        }
-        fs.unlinkSync(filePath);
-        res.json({ inserted: inserted.length });
-      });
-    } else if (req.body.numbers) {
-      const numbers = Array.isArray(req.body.numbers) ? req.body.numbers : [];
-      const inserted = [];
-      for (const num of numbers) {
-        const r = await runAsync(`INSERT INTO recipients (campaign_id, phone_number) VALUES (?,?) RETURNING id`, [campaignId, num]);
-        inserted.push({ id: r.lastID, phone_number: num });
-      }
-      res.json({ inserted: inserted.length });
-    } else {
-      res.status(400).json({ error: 'No file or numbers provided' });
+    const campaign = await getAsync(`SELECT * FROM campaigns WHERE id = ?`, [campaignId]);
+    if (!campaign) return res.status(404).json({ error: 'campaign not found' });
+
+    if (String(campaign.status || '').toLowerCase() === 'stopped') {
+      return res.status(400).json({ error: 'Cannot upload recipients to a stopped campaign.' });
     }
+
+    const numbers = [];
+
+    if (req.file) {
+      const content = fs.readFileSync(req.file.path, 'utf8');
+      await new Promise((resolve, reject) => {
+        csvParse(content, { trim: true, skip_empty_lines: true }, (err, records) => {
+          if (err) return reject(err);
+          for (const row of records) {
+            const num = normalizePhoneNumber(row[0]);
+            if (num && !/^phone/i.test(num)) numbers.push(num);
+          }
+          resolve();
+        });
+      });
+      try { fs.unlinkSync(req.file.path); } catch (err) { /* ignore */ }
+    } else if (Array.isArray(req.body.numbers)) {
+      for (const num of req.body.numbers) {
+        const normalized = normalizePhoneNumber(num);
+        if (normalized) numbers.push(normalized);
+      }
+    } else {
+      return res.status(400).json({ error: 'No file or numbers provided' });
+    }
+
+    const inserted = [];
+    for (const number of numbers) {
+      const result = await runAsync(
+        `INSERT INTO recipients (campaign_id, phone_number, status) VALUES (?,?,?) RETURNING id`,
+        [campaignId, number, 'pending']
+      );
+      inserted.push({ id: result.lastID, phone_number: number });
+    }
+
+    if (inserted.length > 0 && (!campaign.status || String(campaign.status).toLowerCase() === 'draft')) {
+      await runAsync(`UPDATE campaigns SET status = ? WHERE id = ?`, ['active', campaignId]);
+    }
+
+    res.json({ inserted: inserted.length, recipients: inserted });
   } catch (err) {
     console.error('/api/campaigns/:id/recipients/upload error', err);
     res.status(500).json({ error: err.message });
   }
 });
 
+async function scheduleRetryOrFail(recipient, campaign, detail) {
+  const maxAttempts = Number(campaign.max_attempts || 3);
+  const retryDelayMinutes = Number(campaign.retry_delay_minutes || 5);
+
+  await runAsync(
+    `UPDATE recipients SET attempts = attempts + 1, last_attempt_at = ?, last_status_detail = ? WHERE id = ?`,
+    [nowIso(), detail, recipient.id]
+  );
+
+  const updated = await getAsync(`SELECT * FROM recipients WHERE id = ?`, [recipient.id]);
+  const attempts = Number(updated.attempts || 0);
+
+  if (attempts >= maxAttempts) {
+    await runAsync(
+      `UPDATE recipients SET status = ?, next_attempt_at = NULL WHERE id = ?`,
+      ['failed_permanent', recipient.id]
+    );
+  } else {
+    const nextAttemptAt = new Date(Date.now() + retryDelayMinutes * 60 * 1000).toISOString();
+    await runAsync(
+      `UPDATE recipients SET status = ?, next_attempt_at = ? WHERE id = ?`,
+      ['retry', nextAttemptAt, recipient.id]
+    );
+  }
+
+  await refreshCampaignCompletion(recipient.campaign_id);
+}
+
 async function sendVoiceCall(recipient, campaign) {
-  // If plivo configured, create call and store call uuid
+  const campaignStatus = String(campaign.status || '').toLowerCase();
+  if (campaignStatus === 'stopped' || campaignStatus === 'completed') {
+    return { skipped: true, reason: `campaign is ${campaignStatus}` };
+  }
+
   if (!plivoClient) {
-    // simulate: mark sent but do NOT increment attempts here; attempts are incremented on failure
-    const nowIst = formatToIST(new Date().toISOString());
-    await runAsync(`UPDATE recipients SET status = ?, last_attempt_at = ? WHERE id = ?`, ['sent', nowIst, recipient.id]);
+    await runAsync(
+      `UPDATE recipients SET status = ?, last_attempt_at = ?, last_status_detail = ? WHERE id = ?`,
+      ['completed', nowIso(), 'Simulated voice completion because Plivo credentials are not configured.', recipient.id]
+    );
+    await refreshCampaignCompletion(recipient.campaign_id);
     return { simulated: true };
   }
-  const answerUrl = `${process.env.BASE_URL || 'http://example.com'}/api/plivo/answer?recipient_id=${recipient.id}`;
-  console.log('Creating Plivo call', { to: recipient.phone_number, recipientId: recipient.id, answerUrl });
+
+  const baseUrl = (process.env.BASE_URL || 'http://example.com').replace(/\/$/, '');
+  const answerUrl = `${baseUrl}/api/plivo/answer?recipient_id=${recipient.id}`;
+
   try {
     const options = {
       answer_method: 'GET',
-      hangup_url: `${process.env.BASE_URL || 'http://example.com'}/api/plivo/webhook`,
-      hangup_method: 'POST'
+      hangup_url: `${baseUrl}/api/plivo/webhook`,
+      hangup_method: 'POST',
     };
-    const res = await plivoClient.calls.create(
+
+    const response = await plivoClient.calls.create(
       PLIVO_SOURCE_NUMBER,
       recipient.phone_number,
       answerUrl,
       options
     );
-    console.log('Plivo call create response:', res);
-    // attempt to extract uuid
-    const uuid = res && (res.request_uuid || res.requestUuid || res.request_uuid) ? (res.request_uuid || res.requestUuid || res.request_uuid) : null;
-    const nowIst = formatToIST(new Date().toISOString());
+
+    const uuid = response && (response.request_uuid || response.requestUuid || response.message_uuid || response.call_uuid) ?
+      (response.request_uuid || response.requestUuid || response.message_uuid || response.call_uuid) : null;
+
     if (uuid) {
-      await runAsync(`UPDATE recipients SET plivo_call_uuid = ?, status = ?, last_attempt_at = ? WHERE id = ?`, [uuid, 'sent', nowIst, recipient.id]);
+      await runAsync(
+        `UPDATE recipients SET plivo_call_uuid = ?, status = ?, last_attempt_at = ?, last_status_detail = ? WHERE id = ?`,
+        [uuid, 'sent', nowIso(), JSON.stringify(response), recipient.id]
+      );
     } else {
-      // still mark as sent but DO NOT increment attempts here; store response
-      await runAsync(`UPDATE recipients SET status = ?, last_status_detail = ? , last_attempt_at = ? WHERE id = ?`, ['sent', JSON.stringify(res), nowIst, recipient.id]);
+      await runAsync(
+        `UPDATE recipients SET status = ?, last_attempt_at = ?, last_status_detail = ? WHERE id = ?`,
+        ['sent', nowIso(), JSON.stringify(response), recipient.id]
+      );
     }
-    return res;
+
+    await refreshCampaignCompletion(recipient.campaign_id);
+    return response;
   } catch (err) {
-    console.error('sendVoiceCall error', err, recipient);
-    await runAsync(`UPDATE recipients SET status = ?, last_status_detail = ? WHERE id = ?`, ['retry', err.message, recipient.id]);
+    console.error('sendVoiceCall error', err.message, recipient);
+    await scheduleRetryOrFail(recipient, campaign, err.message);
     return { error: err.message };
   }
 }
 
-// test endpoint to trigger a single call for debugging
-app.post('/api/recipients/:id/call', basicAuth, async (req, res) => {
-  const id = req.params.id;
-
-  try {
-    const recipient = await getAsync('SELECT * FROM recipients WHERE id = ?', [id]);
-    if (!recipient) {
-      return res.status(404).json({ error: 'recipient not found' });
-    }
-
-    const campaign = await getAsync('SELECT * FROM campaigns WHERE id = ?', [recipient.campaign_id]);
-    if (!campaign) {
-      return res.status(404).json({ error: 'campaign not found' });
-    }
-
-    if (campaign.status === 'stopped') {
-      return res.status(409).json({ error: 'campaign is stopped; recipient call was not triggered' });
-    }
-
-    const result = await sendVoiceCall(recipient, campaign);
-    return res.json({ result });
-  } catch (err) {
-    console.error('/api/recipients/:id/call error', err);
-    return res.status(500).json({ error: err.message });
-  }
-});
-
 async function sendSms(recipient, campaign) {
+  const campaignStatus = String(campaign.status || '').toLowerCase();
+  if (campaignStatus === 'stopped' || campaignStatus === 'completed') {
+    return { skipped: true, reason: `campaign is ${campaignStatus}` };
+  }
+
   if (!plivoClient) {
-    // simulated SMS: mark sent but do not increment attempts here
-    const nowIst = formatToIST(new Date().toISOString());
-    await runAsync(`UPDATE recipients SET status = ?, last_attempt_at = ? WHERE id = ?`, ['sent', nowIst, recipient.id]);
+    await runAsync(
+      `UPDATE recipients SET status = ?, last_attempt_at = ?, last_status_detail = ? WHERE id = ?`,
+      ['completed', nowIso(), 'Simulated SMS completion because Plivo credentials are not configured.', recipient.id]
+    );
+    await refreshCampaignCompletion(recipient.campaign_id);
     return { simulated: true };
   }
+
   try {
-    const res = await plivoClient.messages.create(
+    const response = await plivoClient.messages.create(
       PLIVO_SOURCE_NUMBER,
       recipient.phone_number,
       campaign.message_text || ''
     );
-    await runAsync(`UPDATE recipients SET status = ?, last_attempt_at = CURRENT_TIMESTAMP WHERE id = ?`, ['sent', recipient.id]);
-    return res;
+
+    await runAsync(
+      `UPDATE recipients SET status = ?, last_attempt_at = ?, last_status_detail = ? WHERE id = ?`,
+      ['completed', nowIso(), JSON.stringify(response), recipient.id]
+    );
+    await refreshCampaignCompletion(recipient.campaign_id);
+    return response;
   } catch (err) {
-    console.error('sendSms error', err, recipient);
-    await runAsync(`UPDATE recipients SET status = ?, last_status_detail = ? WHERE id = ?`, ['failed', err.message, recipient.id]);
+    console.error('sendSms error', err.message, recipient);
+    await scheduleRetryOrFail(recipient, campaign, err.message);
     return { error: err.message };
   }
 }
 
-
-// --- HOTFIX V4 CAMPAIGN STOP ROUTE START ---
-app.post('/api/campaigns/:id/stop', basicAuth, async (req, res) => {
-  const campaignId = req.params.id;
-  const note = (req.body && req.body.note) ? String(req.body.note) : 'Campaign stopped by admin';
+app.post('/api/recipients/:id/call', basicAuth, async (req, res) => {
+  const id = req.params.id;
 
   try {
-    const campaign = await getAsync('SELECT * FROM campaigns WHERE id = ?', [campaignId]);
-    if (!campaign) {
-      return res.status(404).json({ error: 'campaign not found' });
+    const recipient = await getAsync(`SELECT * FROM recipients WHERE id = ?`, [id]);
+    if (!recipient) return res.status(404).json({ error: 'recipient not found' });
+
+    const campaign = await getAsync(`SELECT * FROM campaigns WHERE id = ?`, [recipient.campaign_id]);
+    if (!campaign) return res.status(404).json({ error: 'campaign not found' });
+
+    const campaignStatus = String(campaign.status || '').toLowerCase();
+    if (campaignStatus === 'stopped' || campaignStatus === 'completed') {
+      return res.status(409).json({ error: `campaign is ${campaignStatus}` });
     }
 
-    const stoppedAt = new Date().toISOString();
-
-    await runAsync(
-      'UPDATE campaigns SET status = ?, stopped_at = ? WHERE id = ?',
-      ['stopped', stoppedAt, campaignId]
-    );
-
-    const cancelled = await runAsync(
-      `UPDATE recipients
-       SET status = ?,
-           last_status_detail = ?
-       WHERE campaign_id = ?
-         AND status IN ('pending', 'retry')`,
-      ['cancelled', note, campaignId]
-    );
-
-    return res.json({
-      stopped: true,
-      campaignId: Number(campaignId),
-      stoppedAt,
-      cancelledRecipients: cancelled.rowCount || 0,
-      note,
-    });
+    const result = campaign.type === 'voice' ? await sendVoiceCall(recipient, campaign) : await sendSms(recipient, campaign);
+    res.json({ result });
   } catch (err) {
-    console.error('POST /api/campaigns/:id/stop error', err);
-    return res.status(500).json({ error: err.message });
+    console.error('/api/recipients/:id/call error', err);
+    res.status(500).json({ error: err.message });
   }
 });
-// --- HOTFIX V4 CAMPAIGN STOP ROUTE END ---
 
 app.post('/api/campaigns/:id/start', basicAuth, async (req, res) => {
   const campaignId = req.params.id;
 
   try {
-    const campaign = await getAsync('SELECT * FROM campaigns WHERE id = ?', [campaignId]);
-    if (!campaign) {
-      return res.status(404).json({ error: 'campaign not found' });
-    }
+    const campaign = await getAsync(`SELECT * FROM campaigns WHERE id = ?`, [campaignId]);
+    if (!campaign) return res.status(404).json({ error: 'campaign not found' });
 
-    if (campaign.status === 'stopped') {
-      return res.status(409).json({
-        error: 'Campaign is stopped. Create a new campaign or upload new pending recipients before starting again.',
-      });
-    }
+    const campaignStatus = String(campaign.status || '').toLowerCase();
+    if (campaignStatus === 'stopped') return res.status(409).json({ error: 'Campaign is stopped. Create a new campaign to run again.' });
+    if (campaignStatus === 'completed') return res.status(409).json({ error: 'Campaign is already completed.' });
 
     if (campaign.type === 'voice' && !campaign.voice_url && !campaign.message_text) {
-      return res.status(400).json({ error: 'voice campaign requires campaign.voice_url or message_text' });
+      return res.status(400).json({ error: 'voice campaign requires voice_url or message_text' });
     }
 
-    const startedAt = new Date().toISOString();
-
     await runAsync(
-      `UPDATE campaigns
-       SET status = ?,
-           started_at = COALESCE(started_at, ?),
-           stopped_at = NULL
-       WHERE id = ?`,
-      ['running', startedAt, campaignId]
+      `UPDATE campaigns SET status = ?, started_at = COALESCE(started_at, ?) WHERE id = ?`,
+      ['running', nowIso(), campaignId]
     );
 
+    const latestCampaign = await getAsync(`SELECT * FROM campaigns WHERE id = ?`, [campaignId]);
     const recipients = await allAsync(
-      `SELECT * FROM recipients
-       WHERE campaign_id = ?
-         AND status = 'pending'
-       ORDER BY id`,
+      `SELECT * FROM recipients WHERE campaign_id = ? AND status IN ('pending', 'retry') ORDER BY id ASC`,
       [campaignId]
     );
 
-    let started = 0;
-    let skippedAfterStop = 0;
-    let stopped = false;
-
     for (const recipient of recipients) {
-      const currentCampaign = await getAsync('SELECT status FROM campaigns WHERE id = ?', [campaignId]);
-
-      if (currentCampaign && currentCampaign.status === 'stopped') {
-        stopped = true;
-        skippedAfterStop = recipients.length - started;
-        break;
-      }
-
-      if (campaign.type === 'voice') {
-        await sendVoiceCall(recipient, campaign);
-      } else {
-        await sendSms(recipient, campaign);
-      }
-
-      started += 1;
+      if (latestCampaign.type === 'voice') await sendVoiceCall(recipient, latestCampaign);
+      else await sendSms(recipient, latestCampaign);
     }
 
-    return res.json({
-      campaignId: Number(campaignId),
-      totalPending: recipients.length,
-      started,
-      skippedAfterStop,
-      stopped,
-    });
+    await refreshCampaignCompletion(campaignId);
+    res.json({ started: recipients.length });
   } catch (err) {
-    console.error('POST /api/campaigns/:id/start error', err);
-    return res.status(500).json({ error: err.message });
+    console.error('/api/campaigns/:id/start error', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/campaigns/:id/stop', basicAuth, async (req, res) => {
+  const campaignId = req.params.id;
+
+  try {
+    const campaign = await getAsync(`SELECT * FROM campaigns WHERE id = ?`, [campaignId]);
+    if (!campaign) return res.status(404).json({ error: 'campaign not found' });
+
+    const stoppedAt = nowIso();
+    await runAsync(
+      `UPDATE campaigns SET status = ?, stopped_at = COALESCE(stopped_at, ?) WHERE id = ?`,
+      ['stopped', stoppedAt, campaignId]
+    );
+
+    await runAsync(
+      `UPDATE recipients SET status = ?, next_attempt_at = NULL, last_status_detail = COALESCE(last_status_detail, ?) WHERE campaign_id = ? AND status IN ('pending', 'retry')`,
+      ['cancelled', `Campaign stopped at ${formatToIndiaTime(stoppedAt)}`, campaignId]
+    );
+
+    const bundle = await getCampaignWithRecipients(campaignId);
+    res.json({ stopped: true, campaign: normalizeCampaign(bundle.campaign, bundle.stats), stats: bundle.stats });
+  } catch (err) {
+    console.error('/api/campaigns/:id/stop error', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
 app.post('/api/plivo/webhook', express.urlencoded({ extended: true }), async (req, res) => {
-  // Plivo will POST call status updates. This handler should be secured/validated.
   const event = req.body;
-  // Example fields: CallUUID, CallStatus, To
+
   try {
-    const callUuid = event.CallUUID || event.CallUUID;
-    const callStatus = event.CallStatus || event.CallStatus;
+    const callUuid = event.CallUUID || event.CallUuid || event.RequestUUID || event.request_uuid;
+    const callStatus = event.CallStatus || event.Status || event.Event || 'unknown';
     if (!callUuid) return res.status(400).send('missing CallUUID');
-    // find recipient by plivo_call_uuid
+
     const recipient = await getAsync(`SELECT * FROM recipients WHERE plivo_call_uuid = ?`, [callUuid]);
     if (!recipient) return res.status(404).send('recipient not found');
-    const eventTs = formatToIST(new Date().toISOString());
-    await runAsync(`INSERT INTO call_events (recipient_id, plivo_call_uuid, event_type, details, timestamp) VALUES (?,?,?,?,?)`, [recipient.id, callUuid, callStatus, JSON.stringify(event), eventTs]);
 
-    // load campaign to know retry settings
+    await runAsync(
+      `INSERT INTO call_events (recipient_id, plivo_call_uuid, event_type, details, timestamp) VALUES (?,?,?,?,?)`,
+      [recipient.id, callUuid, callStatus, JSON.stringify(event), nowIso()]
+    );
+
     const campaign = await getAsync(`SELECT * FROM campaigns WHERE id = ?`, [recipient.campaign_id]);
-    const maxAttempts = (campaign && campaign.max_attempts) ? parseInt(campaign.max_attempts, 10) : 4;
-    const retryDelayMinutes = (campaign && campaign.retry_delay_minutes) ? parseInt(campaign.retry_delay_minutes, 10) : 5;
+    if (!campaign) return res.status(404).send('campaign not found');
 
-    async function markForRetryOrFail() {
-      // increment attempts now (count failure) and write IST last_attempt_at
-      const nowIst = formatToIST(new Date().toISOString());
-      await runAsync(`UPDATE recipients SET attempts = attempts + 1, last_attempt_at = ? WHERE id = ?`, [nowIst, recipient.id]);
-      const updated = await getAsync(`SELECT attempts FROM recipients WHERE id = ?`, [recipient.id]);
-      const attempts = (updated && updated.attempts) ? updated.attempts : 0;
-
-      if (attempts >= maxAttempts) {
-        // mark permanent failure and export to CSV for download
-        await runAsync(`UPDATE recipients SET status = ?, last_status_detail = ? WHERE id = ?`, ['failed_permanent', JSON.stringify(event), recipient.id]);
-        try {
-          // append to CSV in uploads directory
-          const csvPath = path.join(UPLOADS_DIR, `failed_campaign_${recipient.campaign_id}.csv`);
-          const header = 'phone_number,status,attempts,last_attempt_at,last_status_detail\n';
-          const updatedRecipient = await getAsync(`SELECT * FROM recipients WHERE id = ?`, [recipient.id]);
-          const lastAttemptIst = updatedRecipient && updatedRecipient.last_attempt_at ? formatToIST(updatedRecipient.last_attempt_at) : '';
-          const line = `${recipient.phone_number},failed_permanent,${attempts},${lastAttemptIst},"${(JSON.stringify(event)||'').replace(/"/g,'""')}"\n`;
-          if (!fs.existsSync(csvPath)) fs.writeFileSync(csvPath, header);
-          fs.appendFileSync(csvPath, line);
-          console.log('Appended failed recipient to', csvPath);
-        } catch (e) {
-          console.error('Error exporting failed recipient to CSV', e);
-        }
-      } else {
-        // schedule next attempt using epoch ms to avoid timezone parsing issues
-        const nextAttemptAt = new Date(Date.now() + (retryDelayMinutes * 60 * 1000)).toISOString();
-        await runAsync(`UPDATE recipients SET status = ?, next_attempt_at = ? WHERE id = ?`, ['retry', nextAttemptAt, recipient.id]);
-      }
+    const campaignStatus = String(campaign.status || '').toLowerCase();
+    if (campaignStatus === 'stopped') {
+      await runAsync(
+        `UPDATE recipients SET last_status_detail = ? WHERE id = ?`,
+        [JSON.stringify(event), recipient.id]
+      );
+      return res.send('ok');
     }
 
-    if (callStatus === 'completed') {
-      // mark completed only if full duration; Plivo provides BillDuration
-      const bill = parseInt(event.BillDuration || '0', 10);
-      if (bill > 0) {
-        await runAsync(`UPDATE recipients SET status = ? WHERE id = ?`, ['completed', recipient.id]);
+    const normalizedStatus = String(callStatus || '').toLowerCase();
+    if (normalizedStatus === 'completed') {
+      const bill = parseInt(event.BillDuration || event.TotalCost || '0', 10);
+      if (bill > 0 || event.BillDuration === undefined) {
+        await runAsync(
+          `UPDATE recipients SET status = ?, last_status_detail = ?, last_attempt_at = ? WHERE id = ?`,
+          ['completed', JSON.stringify(event), nowIso(), recipient.id]
+        );
       } else {
-        // no answer or 0 seconds
-        await markForRetryOrFail();
+        await scheduleRetryOrFail(recipient, campaign, JSON.stringify(event));
       }
-    } else if (callStatus === 'no-answer' || callStatus === 'busy' || callStatus === 'failed' || callStatus === 'cancelled' || callStatus === 'canceled') {
-      await markForRetryOrFail();
+    } else if (['no-answer', 'busy', 'failed', 'cancelled', 'canceled', 'timeout', 'rejected'].includes(normalizedStatus)) {
+      await scheduleRetryOrFail(recipient, campaign, JSON.stringify(event));
+    } else {
+      await runAsync(
+        `UPDATE recipients SET status = ?, last_status_detail = ?, last_attempt_at = ? WHERE id = ?`,
+        ['sent', JSON.stringify(event), nowIso(), recipient.id]
+      );
     }
+
+    await refreshCampaignCompletion(recipient.campaign_id);
     res.send('ok');
   } catch (err) {
     console.error('/api/plivo/webhook error', err);
@@ -545,107 +713,212 @@ app.post('/api/plivo/webhook', express.urlencoded({ extended: true }), async (re
   }
 });
 
-// endpoint to download failed recipients CSV for a campaign
-app.get('/api/campaigns/:id/failed/export', basicAuth, async (req, res) => {
-  const campaignId = req.params.id;
-  try {
-    const csvPath = path.join(UPLOADS_DIR, `failed_campaign_${campaignId}.csv`);
-    if (!fs.existsSync(csvPath)) return res.status(404).json({ error: 'no failed export found' });
-    return res.download(csvPath);
-  } catch (err) {
-    console.error('/api/campaigns/:id/failed/export error', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 app.all('/api/plivo/answer', async (req, res) => {
-  // Plivo will request this URL when answering a call. We accept GET or POST and return XML to play a file or speak the campaign message.
-  const recipientId = req.query.recipient_id || req.body && req.body.recipient_id;
-  const tts = req.query.tts || req.body && req.body.tts;
+  const recipientId = req.query.recipient_id || (req.body && req.body.recipient_id);
+  const tts = req.query.tts || (req.body && req.body.tts);
   if (!recipientId) return res.status(400).send('missing recipient_id');
+
   try {
-    console.log('/api/plivo/answer incoming request', { method: req.method, ip: req.ip, query: req.query });
     const recipient = await getAsync(`SELECT * FROM recipients WHERE id = ?`, [recipientId]);
     if (!recipient) {
-      console.warn(`/api/plivo/answer recipient ${recipientId} not found - returning default Speak to avoid Plivo error`);
-      const xml = `<?xml version="1.0" encoding="UTF-8"?><Response><Speak>We're sorry, the message is not available.</Speak></Response>`;
       res.set('Content-Type', 'application/xml');
-      return res.send(xml);
+      return res.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Speak>Message is not available.</Speak></Response>`);
     }
+
     const campaign = await getAsync(`SELECT * FROM campaigns WHERE id = ?`, [recipient.campaign_id]);
-    console.log('/api/plivo/answer campaign data', { recipientId, campaignId: recipient.campaign_id, campaign });
-    
-    // If caller explicitly requests TTS (for debugging), return <Speak>
-    if (tts === '1' || tts === 'true') {
+    const campaignStatus = String(campaign && campaign.status || '').toLowerCase();
+
+    if (campaignStatus === 'stopped') {
+      res.set('Content-Type', 'application/xml');
+      return res.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Speak>This campaign has been stopped.</Speak></Response>`);
+    }
+
+    if ((tts === '1' || tts === 'true') || !(campaign && campaign.voice_url)) {
       const text = (campaign && campaign.message_text) ? campaign.message_text : 'Hello';
-      const xml = `<?xml version="1.0" encoding="UTF-8"?><Response><Speak>${text}</Speak></Response>`;
-      console.log('/api/plivo/answer returning Speak XML (forced by tts param)', { recipientId, text });
       res.set('Content-Type', 'application/xml');
-      return res.send(xml);
+      return res.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Speak>${String(text).replace(/[<>&]/g, '')}</Speak></Response>`);
     }
 
-    if (campaign && campaign.voice_url) {
-      const xml = `<?xml version="1.0" encoding="UTF-8"?><Response><Play>${campaign.voice_url}</Play></Response>`;
-      console.log('/api/plivo/answer returning Play XML', { recipientId, voice_url: campaign.voice_url, xmlLength: xml.length });
-      res.set('Content-Type', 'application/xml');
-      return res.send(xml);
-    }
-
-    const text = (campaign && campaign.message_text) ? campaign.message_text : 'Hello';
-    const xml = `<?xml version="1.0" encoding="UTF-8"?><Response><Speak>${text}</Speak></Response>`;
-    console.log('/api/plivo/answer returning Speak XML (fallback)', { recipientId, text });
     res.set('Content-Type', 'application/xml');
-    res.send(xml);
+    return res.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Play>${campaign.voice_url}</Play></Response>`);
   } catch (err) {
     console.error('/api/plivo/answer error', err);
     res.status(500).send(err.message);
   }
 });
- 
+
+function buildCampaignRecipientCsv(campaign, recipients) {
+  const header = [
+    'campaign_id',
+    'campaign_name',
+    'campaign_status',
+    'phone_number',
+    'recipient_status',
+    'attempts',
+    'last_attempt_ist',
+    'next_attempt_ist',
+    'last_status_detail',
+  ];
+
+  const lines = recipients.map((recipient) => [
+    campaign.id,
+    campaign.name,
+    campaign.status,
+    recipient.phone_number,
+    recipient.status,
+    recipient.attempts || 0,
+    formatToIndiaTime(recipient.last_attempt_at),
+    formatToIndiaTime(recipient.next_attempt_at),
+    recipient.last_status_detail || '',
+  ].map(csvEscape).join(','));
+
+  return [header.join(','), ...lines].join('\n');
+}
+
+async function buildCampaignLogsCsv(campaignId) {
+  const campaign = await getAsync(`SELECT * FROM campaigns WHERE id = ?`, [campaignId]);
+  if (!campaign) return null;
+
+  const recipients = await allAsync(`SELECT * FROM recipients WHERE campaign_id = ? ORDER BY id ASC`, [campaignId]);
+  const events = await allAsync(
+    `SELECT ce.*, r.phone_number, r.status AS recipient_status
+     FROM call_events ce
+     LEFT JOIN recipients r ON r.id = ce.recipient_id
+     WHERE r.campaign_id = ?
+     ORDER BY ce.timestamp ASC, ce.id ASC`,
+    [campaignId]
+  );
+
+  const lines = [];
+  lines.push([
+    'record_type', 'campaign_id', 'campaign_name', 'campaign_status', 'phone_number', 'recipient_status', 'attempts',
+    'event_type', 'timestamp_ist', 'last_attempt_ist', 'next_attempt_ist', 'plivo_call_uuid', 'details'
+  ].join(','));
+
+  for (const recipient of recipients) {
+    lines.push([
+      'recipient',
+      campaign.id,
+      campaign.name,
+      campaign.status || '',
+      recipient.phone_number,
+      recipient.status || '',
+      recipient.attempts || 0,
+      '',
+      '',
+      formatToIndiaTime(recipient.last_attempt_at),
+      formatToIndiaTime(recipient.next_attempt_at),
+      recipient.plivo_call_uuid || '',
+      recipient.last_status_detail || '',
+    ].map(csvEscape).join(','));
+  }
+
+  for (const event of events) {
+    lines.push([
+      'event',
+      campaign.id,
+      campaign.name,
+      campaign.status || '',
+      event.phone_number || '',
+      event.recipient_status || '',
+      '',
+      event.event_type || '',
+      formatToIndiaTime(event.timestamp),
+      '',
+      '',
+      event.plivo_call_uuid || '',
+      event.details || '',
+    ].map(csvEscape).join(','));
+  }
+
+  return lines.join('\n');
+}
 
 app.get('/api/campaigns/:id/export', basicAuth, async (req, res) => {
   const campaignId = req.params.id;
   const format = (req.query.format || 'csv').toLowerCase();
+
   try {
-    const rows = await allAsync(`SELECT phone_number, status, attempts, last_attempt_at, last_status_detail FROM recipients WHERE campaign_id = ?`, [campaignId]);
-    // convert timestamps to India time for CSV export and JSON
-    const normRows = rows.map(r => ({
-      ...r,
-      last_attempt_at: formatToIST(r.last_attempt_at),
-      next_attempt_at: formatToIST(r.next_attempt_at)
-    }));
-    if (format === 'csv') {
-      const header = 'phone_number,status,attempts,last_attempt_at,last_status_detail\n';
-      const lines = normRows.map(r => `${r.phone_number},${r.status},${r.attempts},${r.last_attempt_at || ''},"${(r.last_status_detail||'').replace(/"/g,'""')}"`).join('\n');
-      const csv = header + lines;
-      res.setHeader('Content-Disposition', `attachment; filename="campaign_${campaignId}.csv"`);
-      res.set('Content-Type', 'text/csv');
-      return res.send(csv);
+    const bundle = await refreshCampaignCompletion(campaignId);
+    if (!bundle) return res.status(404).json({ error: 'campaign not found' });
+
+    const campaign = normalizeCampaign(bundle.campaign, bundle.stats);
+    const recipients = bundle.recipients.map(normalizeRecipient);
+
+    if (format === 'json') {
+      return res.json({ campaign, recipients, stats: bundle.stats, timezone: INDIA_TIME_ZONE });
     }
-    res.json({ campaignId, recipients: normRows });
+
+    const csv = buildCampaignRecipientCsv(campaign, recipients);
+    res.setHeader('Content-Disposition', `attachment; filename="campaign_${campaignId}_recipients_IST.csv"`);
+    res.set('Content-Type', 'text/csv; charset=utf-8');
+    return res.send(csv);
   } catch (err) {
+    console.error('/api/campaigns/:id/export error', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/campaigns/:id/logs/export', basicAuth, async (req, res) => {
+  const campaignId = req.params.id;
+
+  try {
+    const csv = await buildCampaignLogsCsv(campaignId);
+    if (!csv) return res.status(404).json({ error: 'campaign not found' });
+
+    res.setHeader('Content-Disposition', `attachment; filename="campaign_${campaignId}_logs_IST.csv"`);
+    res.set('Content-Type', 'text/csv; charset=utf-8');
+    return res.send(csv);
+  } catch (err) {
+    console.error('/api/campaigns/:id/logs/export error', err);
     res.status(500).json({ error: err.message });
   }
 });
 
 app.get('/api/campaigns/:id/status', basicAuth, async (req, res) => {
   const campaignId = req.params.id;
+
   try {
-    const campaign = await getAsync(`SELECT * FROM campaigns WHERE id = ?`, [campaignId]);
-    if (!campaign) return res.status(404).json({ error: 'campaign not found' });
-    const recipients = await allAsync(`SELECT * FROM recipients WHERE campaign_id = ?`, [campaignId]);
-    const normRecipients = recipients.map(r => ({
-      ...r,
-      last_attempt_at: formatToIST(r.last_attempt_at),
-      next_attempt_at: formatToIST(r.next_attempt_at)
-    }));
-    res.json({ campaign, recipients: normRecipients });
+    const bundle = await refreshCampaignCompletion(campaignId);
+    if (!bundle) return res.status(404).json({ error: 'campaign not found' });
+
+    const campaign = normalizeCampaign(bundle.campaign, bundle.stats);
+    const recipients = bundle.recipients.map(normalizeRecipient);
+    res.json({ campaign, recipients, stats: bundle.stats, timezone: INDIA_TIME_ZONE });
   } catch (err) {
+    console.error('/api/campaigns/:id/status error', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/campaigns/:id/failed/export', basicAuth, async (req, res) => {
+  const campaignId = req.params.id;
+
+  try {
+    const rows = await allAsync(
+      `SELECT * FROM recipients WHERE campaign_id = ? AND status IN ('failed', 'failed_permanent') ORDER BY id ASC`,
+      [campaignId]
+    );
+
+    const header = ['phone_number', 'status', 'attempts', 'last_attempt_ist', 'last_status_detail'];
+    const lines = rows.map((row) => [
+      row.phone_number,
+      row.status,
+      row.attempts || 0,
+      formatToIndiaTime(row.last_attempt_at),
+      row.last_status_detail || '',
+    ].map(csvEscape).join(','));
+
+    res.setHeader('Content-Disposition', `attachment; filename="failed_campaign_${campaignId}_IST.csv"`);
+    res.set('Content-Type', 'text/csv; charset=utf-8');
+    return res.send([header.join(','), ...lines].join('\n'));
+  } catch (err) {
+    console.error('/api/campaigns/:id/failed/export error', err);
     res.status(500).json({ error: err.message });
   }
 });
 
 (async () => {
   await init();
-  app.listen(PORT, () => console.log(`Server listening on ${PORT}`));
+  app.listen(PORT, () => console.log(`Server listening on ${PORT}. Display timezone: ${INDIA_TIME_ZONE}`));
 })();

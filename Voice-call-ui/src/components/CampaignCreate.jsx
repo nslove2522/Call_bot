@@ -1,149 +1,105 @@
 import React, { useState } from 'react';
 import { createCampaign, uploadFile } from '../api';
 
-function getResponseData(response) {
-  return response && response.data ? response.data : response;
-}
-
-function normalizePhoneHint(value) {
-  if (!value) return '';
-  return String(value).trim();
-}
-
-export default function CampaignCreate({ token, onCreated }) {
+export default function CampaignCreate({ authToken, onCreated }) {
   const [name, setName] = useState('');
   const [type, setType] = useState('voice');
-  const [message, setMessage] = useState('');
+  const [messageText, setMessageText] = useState('');
   const [voiceUrl, setVoiceUrl] = useState('');
-  const [retry, setRetry] = useState(1);
+  const [voiceFile, setVoiceFile] = useState(null);
+  const [retryDelay, setRetryDelay] = useState(1);
   const [maxAttempts, setMaxAttempts] = useState(3);
-  const [err, setErr] = useState(null);
-  const [success, setSuccess] = useState(null);
-  const [uploading, setUploading] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
-  async function handleCreate(event) {
-    event.preventDefault();
-    setErr(null);
-    setSuccess(null);
-    setCreating(true);
+  async function submit(e) {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
 
     try {
+      let finalVoiceUrl = voiceUrl.trim();
+      if (voiceFile) {
+        const uploadRes = await uploadFile(voiceFile, authToken);
+        finalVoiceUrl = uploadRes.data.url;
+      }
+
       const payload = {
         name: name.trim(),
         type,
-        message_text: message.trim(),
-        voice_url: normalizePhoneHint(voiceUrl),
-        retry_delay_minutes: Number(retry) || 1,
-        max_attempts: Number(maxAttempts) || 3,
+        message_text: messageText,
+        voice_url: finalVoiceUrl,
+        retry_delay_minutes: Number(retryDelay),
+        max_attempts: Number(maxAttempts),
       };
 
-      if (!payload.name) throw new Error('Campaign name is required.');
-      if (payload.type === 'voice' && !payload.message_text && !payload.voice_url) {
-        throw new Error('Voice campaign requires either Message or Voice URL.');
-      }
-      if (payload.type === 'sms' && !payload.message_text) {
-        throw new Error('SMS campaign requires Message.');
-      }
-
-      const response = await createCampaign(token, payload);
-      const data = getResponseData(response);
-      const createdId = data && data.id;
-
-      if (!createdId) {
-        throw new Error(`Campaign was created but backend did not return an id. Response: ${JSON.stringify(data)}`);
-      }
-
-      setSuccess(`Campaign created successfully. ID: ${createdId}`);
-      if (typeof onCreated === 'function') onCreated(createdId);
-    } catch (error) {
-      setErr(error?.response?.data?.error || error.message || 'Create campaign failed');
+      const res = await createCampaign(payload, authToken);
+      const campaignId = res.data.id;
+      if (!campaignId) throw new Error('Campaign was created but no id was returned. Backend is being dramatic.');
+      onCreated(campaignId);
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message);
     } finally {
-      setCreating(false);
-    }
-  }
-
-  async function handleFileUpload(event) {
-    const file = event.target.files && event.target.files[0];
-    if (!file) return;
-
-    setErr(null);
-    setUploading(true);
-
-    try {
-      const response = await uploadFile(token, file);
-      const data = getResponseData(response);
-      if (!data || !data.url) throw new Error('Upload completed but no URL was returned.');
-      setVoiceUrl(data.url);
-      setSuccess('Voice file uploaded successfully.');
-    } catch (error) {
-      setErr(error?.response?.data?.error || error.message || 'Upload failed');
-    } finally {
-      setUploading(false);
+      setLoading(false);
     }
   }
 
   return (
-    <form className="premium-card campaign-card" onSubmit={handleCreate}>
-      <div className="card-kicker">New campaign</div>
-      <h3>Create Campaign</h3>
-      <p className="muted">Build a voice or SMS campaign. Use a public MP3 URL or upload an audio file to Supabase Storage.</p>
+    <form className="panel premium-form" onSubmit={submit}>
+      <div className="panel-heading">
+        <div>
+          <span className="eyebrow red">New campaign</span>
+          <h2>Create Campaign</h2>
+          <p className="muted">Upload an MP3, paste a public voice URL, or use fallback text-to-speech.</p>
+        </div>
+      </div>
 
-      <label className="field">
-        <span>Name</span>
-        <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Example: June refill reminder" required />
-      </label>
+      <div className="form-grid">
+        <div className="field span-2">
+          <label>Name</label>
+          <input value={name} onChange={(e) => setName(e.target.value)} required placeholder="Example: June refill reminder" />
+        </div>
 
-      <div className="two-col">
-        <label className="field">
-          <span>Type</span>
-          <select value={type} onChange={(event) => setType(event.target.value)}>
+        <div className="field">
+          <label>Type</label>
+          <select value={type} onChange={(e) => setType(e.target.value)}>
             <option value="voice">Voice</option>
             <option value="sms">SMS</option>
           </select>
-        </label>
+        </div>
 
-        <label className="field">
-          <span>Max Attempts</span>
-          <input type="number" min="1" value={maxAttempts} onChange={(event) => setMaxAttempts(event.target.value)} />
-        </label>
+        <div className="field">
+          <label>Max Attempts</label>
+          <input type="number" min="1" max="10" value={maxAttempts} onChange={(e) => setMaxAttempts(e.target.value)} />
+        </div>
+
+        <div className="field span-2">
+          <label>Fallback text / TTS message</label>
+          <textarea value={messageText} onChange={(e) => setMessageText(e.target.value)} placeholder="Write the message here" />
+        </div>
+
+        <div className="field upload-zone span-2">
+          <label>Voice file</label>
+          <input type="file" accept="audio/*,.mp3,.wav" onChange={(e) => setVoiceFile(e.target.files?.[0] || null)} />
+          <p className="hint">Uploaded files go to Supabase Storage. Use public MP3 URLs for fastest testing.</p>
+        </div>
+
+        <div className="field span-2">
+          <label>Voice URL</label>
+          <input value={voiceUrl} onChange={(e) => setVoiceUrl(e.target.value)} placeholder="https://.../message.mp3" />
+        </div>
+
+        <div className="field">
+          <label>Retry Delay Minutes</label>
+          <input type="number" min="1" value={retryDelay} onChange={(e) => setRetryDelay(e.target.value)} />
+        </div>
       </div>
 
-      <label className="field">
-        <span>{type === 'voice' ? 'Fallback text / TTS message' : 'SMS Message'}</span>
-        <textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Write the message here" />
-      </label>
+      {error && <div className="alert danger">{error}</div>}
 
-      {type === 'voice' && (
-        <div className="upload-panel">
-          <label className="field">
-            <span>Voice file</span>
-            <input type="file" accept="audio/*" onChange={handleFileUpload} />
-          </label>
-          {uploading && <div className="inline-note">Uploading audio...</div>}
-
-          <label className="field">
-            <span>Voice URL</span>
-            <input
-              value={voiceUrl}
-              onChange={(event) => setVoiceUrl(event.target.value)}
-              placeholder="Paste public MP3 URL or upload a file"
-            />
-          </label>
-        </div>
-      )}
-
-      <label className="field">
-        <span>Retry Delay (minutes)</span>
-        <input type="number" min="1" value={retry} onChange={(event) => setRetry(event.target.value)} />
-      </label>
-
-      <button className="primary-button full" type="submit" disabled={creating || uploading}>
-        {creating ? 'Creating campaign...' : 'Create Campaign'}
+      <button className="btn btn-primary btn-large" disabled={loading} type="submit">
+        {loading ? 'Creating...' : 'Create campaign'}
       </button>
-
-      {success && <div className="alert success-alert">{success}</div>}
-      {err && <div className="alert error-alert">{err}</div>}
     </form>
   );
 }

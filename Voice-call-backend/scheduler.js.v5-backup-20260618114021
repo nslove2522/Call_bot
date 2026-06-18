@@ -25,11 +25,7 @@ function parseDueTime(value) {
 async function processRetries() {
   try {
     const rows = await allAsync(
-      `SELECT r.id, r.next_attempt_at
-       FROM recipients r
-       JOIN campaigns c ON c.id = r.campaign_id
-       WHERE r.status = 'retry'
-         AND COALESCE(c.status, '') NOT IN ('stopped', 'completed')`,
+      `SELECT id, next_attempt_at FROM recipients WHERE status = 'retry'`,
       []
     );
 
@@ -38,7 +34,7 @@ async function processRetries() {
       if (nextAttemptMs && nextAttemptMs > Date.now()) continue;
 
       await runAsync(
-        `UPDATE recipients SET status = ?, next_attempt_at = NULL WHERE id = ?`,
+        `UPDATE recipients SET status = ? WHERE id = ?`,
         ['pending', row.id]
       );
 
