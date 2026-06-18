@@ -367,3 +367,37 @@ input:focus, textarea:focus, select:focus { border-color: #ef4444; box-shadow: 0
     min-height: auto;
   }
 }
+
+/* Hotfix V7: destructive campaign/log controls */
+.hero-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.btn-danger-soft {
+  background: #fff1f2;
+  color: #991b1b;
+  border: 1px solid #fecdd3;
+  box-shadow: none;
+}
+
+.btn-danger-soft:hover:not(:disabled) {
+  background: #ffe4e6;
+  box-shadow: 0 12px 28px rgba(185, 28, 28, .12);
+}
+
+.campaign-row .btn-danger-soft {
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .hero-actions {
+    width: 100%;
+    justify-content: stretch;
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

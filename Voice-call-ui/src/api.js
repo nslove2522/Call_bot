@@ -80,6 +80,15 @@ export async function stopCampaign(campaignId, token) {
   return axios.post(`${API_BASE}/api/campaigns/${campaignId}/stop`, {}, { headers: getAuthHeaders(token) });
 }
 
+
+export async function deleteCampaign(campaignId, token) {
+  return axios.delete(`${API_BASE}/api/campaigns/${campaignId}`, { headers: getAuthHeaders(token) });
+}
+
+export async function deleteAllLogs(token) {
+  return axios.delete(`${API_BASE}/api/logs`, { headers: getAuthHeaders(token) });
+}
+
 export async function getStatus(campaignId, token) {
   return axios.get(`${API_BASE}/api/campaigns/${campaignId}/status`, { headers: getAuthHeaders(token) });
 }

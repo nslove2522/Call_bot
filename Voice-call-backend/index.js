@@ -715,6 +715,56 @@ app.post('/api/campaigns/:id/stop', basicAuth, async (req, res) => {
   }
 });
 
+
+app.delete('/api/campaigns/:id', basicAuth, async (req, res) => {
+  const campaignId = req.params.id;
+
+  try {
+    const campaign = await getAsync(`SELECT * FROM campaigns WHERE id = ?`, [campaignId]);
+    if (!campaign) return res.status(404).json({ error: 'campaign not found' });
+
+    // Remove event logs tied to this campaign before deleting recipients.
+    const callEventsResult = await runAsync(
+      `DELETE FROM call_events WHERE recipient_id IN (SELECT id FROM recipients WHERE campaign_id = ?)`,
+      [campaignId]
+    );
+
+    const recipientsResult = await runAsync(`DELETE FROM recipients WHERE campaign_id = ?`, [campaignId]);
+    const campaignResult = await runAsync(`DELETE FROM campaigns WHERE id = ? RETURNING id`, [campaignId]);
+
+    res.json({
+      deleted: true,
+      campaignId,
+      deletedCampaigns: campaignResult.rowCount || 0,
+      deletedRecipients: recipientsResult.rowCount || 0,
+      deletedCallEvents: callEventsResult.rowCount || 0,
+    });
+  } catch (err) {
+    console.error('/api/campaigns/:id DELETE error', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/logs', basicAuth, async (req, res) => {
+  try {
+    const callEventsResult = await runAsync(`DELETE FROM call_events`, []);
+    const recipientDetailsResult = await runAsync(
+      `UPDATE recipients SET last_status_detail = NULL WHERE last_status_detail IS NOT NULL`,
+      []
+    );
+
+    res.json({
+      deleted: true,
+      deletedCallEvents: callEventsResult.rowCount || 0,
+      clearedRecipientDiagnostics: recipientDetailsResult.rowCount || 0,
+      note: 'Campaigns and recipients were preserved. Call event logs and recipient diagnostic details were cleared.',
+    });
+  } catch (err) {
+    console.error('/api/logs DELETE error', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/plivo/webhook', express.urlencoded({ extended: true }), async (req, res) => {
   const event = req.body;
 

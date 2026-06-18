@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import UploadRecipients from './UploadRecipients';
-import { downloadBlob, exportCsv, exportLogsCsv, getStatus, startCampaign, stopCampaign } from '../api';
+import { deleteCampaign, downloadBlob, exportCsv, exportLogsCsv, getStatus, startCampaign, stopCampaign } from '../api';
 
 function statusClass(status) {
   const value = String(status || 'draft').toLowerCase();
@@ -101,6 +101,25 @@ export default function CampaignView({ campaignId, authToken, onBack }) {
     }
   }
 
+
+  async function handleDeleteCampaign() {
+    const label = campaign?.name ? `${campaign.name} (#${campaignId})` : `Campaign #${campaignId}`;
+    const confirmed = window.confirm(`Delete ${label}? This permanently removes the campaign, its recipients, and its call event logs. This cannot be undone.`);
+    if (!confirmed) return;
+
+    setLoading(true);
+    setError('');
+    setNotice('');
+    try {
+      await deleteCampaign(campaignId, authToken);
+      onBack();
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function downloadRecipients() {
     try {
       const res = await exportCsv(campaignId, authToken);
@@ -154,6 +173,7 @@ export default function CampaignView({ campaignId, authToken, onBack }) {
             <button className="btn btn-secondary" onClick={load} disabled={loading}>Refresh</button>
             <button className="btn btn-primary" onClick={handleStart} disabled={loading || terminalCampaign(campaign.status) || !stats.total}>Start Campaign</button>
             <button className="btn btn-danger" onClick={handleStop} disabled={loading || terminalCampaign(campaign.status)}>Stop Campaign</button>
+            <button className="btn btn-danger btn-danger-soft" onClick={handleDeleteCampaign} disabled={loading}>Delete Campaign</button>
             <button className="btn btn-secondary" onClick={downloadRecipients} disabled={!stats.total}>Recipients CSV</button>
             <button className="btn btn-secondary" onClick={() => downloadLogs()} disabled={!stats.total}>Logs CSV</button>
           </div>

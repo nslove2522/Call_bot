@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import CampaignCreate from './CampaignCreate';
 import CampaignView from './CampaignView';
-import { downloadBlob, exportLogsCsv, listCampaigns, listWaitingCalls } from '../api';
+import { deleteAllLogs, deleteCampaign, downloadBlob, exportLogsCsv, listCampaigns, listWaitingCalls } from '../api';
 
 const TILE_CONFIG = [
   {
@@ -69,7 +69,7 @@ function DashboardMetric({ tile, value, active, onClick }) {
   );
 }
 
-function CampaignRow({ item, onOpen, onDownloadLogs, downloading }) {
+function CampaignRow({ item, onOpen, onDownloadLogs, onDeleteCampaign, downloading, deleting }) {
   const campaign = item.campaign;
   const stats = item.stats || {};
   const total = stats.total || 0;
@@ -97,8 +97,11 @@ function CampaignRow({ item, onOpen, onDownloadLogs, downloading }) {
 
       <div className="row-actions">
         <button className="btn btn-secondary" onClick={() => onOpen(campaign.id)}>Open</button>
-        <button className="btn btn-ghost" disabled={!total || downloading} onClick={() => onDownloadLogs(campaign.id)}>
+        <button className="btn btn-ghost" disabled={!total || downloading || deleting} onClick={() => onDownloadLogs(campaign.id)}>
           Logs CSV
+        </button>
+        <button className="btn btn-danger btn-danger-soft" disabled={deleting} onClick={() => onDeleteCampaign(campaign.id, campaign.name)}>
+          {deleting ? 'Deleting...' : 'Delete'}
         </button>
       </div>
     </div>
@@ -174,6 +177,9 @@ export default function Dashboard({ authToken, onLogout }) {
   const [loading, setLoading] = useState(false);
   const [waitingLoading, setWaitingLoading] = useState(false);
   const [downloadingId, setDownloadingId] = useState(null);
+  const [deletingCampaignId, setDeletingCampaignId] = useState(null);
+  const [clearingLogs, setClearingLogs] = useState(false);
+  const [notice, setNotice] = useState('');
 
   const loadWaitingCalls = useCallback(async () => {
     setWaitingLoading(true);
@@ -248,6 +254,46 @@ export default function Dashboard({ authToken, onLogout }) {
     }
   }
 
+
+  async function handleDeleteCampaign(campaignId, campaignName) {
+    const label = campaignName ? `${campaignName} (#${campaignId})` : `Campaign #${campaignId}`;
+    const confirmed = window.confirm(`Delete ${label}? This permanently removes the campaign, its recipients, and its call event logs. This cannot be undone.`);
+    if (!confirmed) return;
+
+    setDeletingCampaignId(campaignId);
+    setError('');
+    setNotice('');
+    try {
+      const res = await deleteCampaign(campaignId, authToken);
+      setNotice(`Deleted ${label}. Removed ${res.data.deletedRecipients || 0} recipient(s) and ${res.data.deletedCallEvents || 0} call log event(s).`);
+      if (selectedCampaignId === campaignId) setSelectedCampaignId(null);
+      await loadCampaigns();
+      if (selectedTile === 'waiting') await loadWaitingCalls();
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message);
+    } finally {
+      setDeletingCampaignId(null);
+    }
+  }
+
+  async function handleDeleteAllLogs() {
+    const confirmed = window.confirm('Delete all call logs for every campaign? Campaigns and recipients will remain, but call event logs and diagnostic details will be cleared. This cannot be undone.');
+    if (!confirmed) return;
+
+    setClearingLogs(true);
+    setError('');
+    setNotice('');
+    try {
+      const res = await deleteAllLogs(authToken);
+      setNotice(`Deleted ${res.data.deletedCallEvents || 0} call log event(s). Cleared ${res.data.clearedRecipientDiagnostics || 0} diagnostic detail field(s).`);
+      await refreshDashboard();
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message);
+    } finally {
+      setClearingLogs(false);
+    }
+  }
+
   function handleTileClick(tileKey) {
     setSelectedTile((current) => current === tileKey ? 'all' : tileKey);
   }
@@ -269,9 +315,15 @@ export default function Dashboard({ authToken, onLogout }) {
             <h1>Campaign command center</h1>
             <p>Track active, running, completed, and waiting calls in one place. Click any tile to drill down.</p>
           </div>
-          <button className="btn btn-light" onClick={refreshDashboard} disabled={loading || waitingLoading}>{loading ? 'Refreshing...' : 'Refresh'}</button>
+          <div className="hero-actions">
+            <button className="btn btn-light" onClick={refreshDashboard} disabled={loading || waitingLoading}>{loading ? 'Refreshing...' : 'Refresh'}</button>
+            <button className="btn btn-outline-light" onClick={handleDeleteAllLogs} disabled={clearingLogs}>
+              {clearingLogs ? 'Deleting logs...' : 'Delete all logs'}
+            </button>
+          </div>
         </section>
 
+        {notice && <div className="alert success">{notice}</div>}
         {error && <div className="alert danger">{error}</div>}
 
         <section className="metrics-grid clickable-metrics">
@@ -320,7 +372,9 @@ export default function Dashboard({ authToken, onLogout }) {
                   item={item}
                   onOpen={setSelectedCampaignId}
                   onDownloadLogs={downloadLogs}
+                  onDeleteCampaign={handleDeleteCampaign}
                   downloading={downloadingId === item.campaign.id}
+                  deleting={deletingCampaignId === item.campaign.id}
                 />
               ))}
             </div>
