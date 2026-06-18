@@ -316,15 +316,27 @@ async function sendVoiceCall(recipient, campaign) {
 // test endpoint to trigger a single call for debugging
 app.post('/api/recipients/:id/call', basicAuth, async (req, res) => {
   const id = req.params.id;
+
   try {
-    const recipient = await getAsync(`SELECT * FROM recipients WHERE id = ?`, [id]);
-    if (!recipient) return res.status(404).json({ error: 'recipient not found' });
-    const campaign = await getAsync(`SELECT * FROM campaigns WHERE id = ?`, [recipient.campaign_id]);
+    const recipient = await getAsync('SELECT * FROM recipients WHERE id = ?', [id]);
+    if (!recipient) {
+      return res.status(404).json({ error: 'recipient not found' });
+    }
+
+    const campaign = await getAsync('SELECT * FROM campaigns WHERE id = ?', [recipient.campaign_id]);
+    if (!campaign) {
+      return res.status(404).json({ error: 'campaign not found' });
+    }
+
+    if (campaign.status === 'stopped') {
+      return res.status(409).json({ error: 'campaign is stopped; recipient call was not triggered' });
+    }
+
     const result = await sendVoiceCall(recipient, campaign);
-    res.json({ result });
+    return res.json({ result });
   } catch (err) {
     console.error('/api/recipients/:id/call error', err);
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -350,26 +362,118 @@ async function sendSms(recipient, campaign) {
   }
 }
 
+
+// --- HOTFIX V4 CAMPAIGN STOP ROUTE START ---
+app.post('/api/campaigns/:id/stop', basicAuth, async (req, res) => {
+  const campaignId = req.params.id;
+  const note = (req.body && req.body.note) ? String(req.body.note) : 'Campaign stopped by admin';
+
+  try {
+    const campaign = await getAsync('SELECT * FROM campaigns WHERE id = ?', [campaignId]);
+    if (!campaign) {
+      return res.status(404).json({ error: 'campaign not found' });
+    }
+
+    const stoppedAt = new Date().toISOString();
+
+    await runAsync(
+      'UPDATE campaigns SET status = ?, stopped_at = ? WHERE id = ?',
+      ['stopped', stoppedAt, campaignId]
+    );
+
+    const cancelled = await runAsync(
+      `UPDATE recipients
+       SET status = ?,
+           last_status_detail = ?
+       WHERE campaign_id = ?
+         AND status IN ('pending', 'retry')`,
+      ['cancelled', note, campaignId]
+    );
+
+    return res.json({
+      stopped: true,
+      campaignId: Number(campaignId),
+      stoppedAt,
+      cancelledRecipients: cancelled.rowCount || 0,
+      note,
+    });
+  } catch (err) {
+    console.error('POST /api/campaigns/:id/stop error', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+// --- HOTFIX V4 CAMPAIGN STOP ROUTE END ---
+
 app.post('/api/campaigns/:id/start', basicAuth, async (req, res) => {
   const campaignId = req.params.id;
+
   try {
-    const campaign = await getAsync(`SELECT * FROM campaigns WHERE id = ?`, [campaignId]);
-    if (!campaign) return res.status(404).json({ error: 'campaign not found' });
-    // validate for voice campaigns that we have a voice source
+    const campaign = await getAsync('SELECT * FROM campaigns WHERE id = ?', [campaignId]);
+    if (!campaign) {
+      return res.status(404).json({ error: 'campaign not found' });
+    }
+
+    if (campaign.status === 'stopped') {
+      return res.status(409).json({
+        error: 'Campaign is stopped. Create a new campaign or upload new pending recipients before starting again.',
+      });
+    }
+
     if (campaign.type === 'voice' && !campaign.voice_url && !campaign.message_text) {
       return res.status(400).json({ error: 'voice campaign requires campaign.voice_url or message_text' });
     }
-    const recipients = await allAsync(`SELECT * FROM recipients WHERE campaign_id = ? AND status = 'pending'`, [campaignId]);
-    for (const r of recipients) {
-      if (campaign.type === 'voice') {
-        await sendVoiceCall(r, campaign);
-      } else {
-        await sendSms(r, campaign);
+
+    const startedAt = new Date().toISOString();
+
+    await runAsync(
+      `UPDATE campaigns
+       SET status = ?,
+           started_at = COALESCE(started_at, ?),
+           stopped_at = NULL
+       WHERE id = ?`,
+      ['running', startedAt, campaignId]
+    );
+
+    const recipients = await allAsync(
+      `SELECT * FROM recipients
+       WHERE campaign_id = ?
+         AND status = 'pending'
+       ORDER BY id`,
+      [campaignId]
+    );
+
+    let started = 0;
+    let skippedAfterStop = 0;
+    let stopped = false;
+
+    for (const recipient of recipients) {
+      const currentCampaign = await getAsync('SELECT status FROM campaigns WHERE id = ?', [campaignId]);
+
+      if (currentCampaign && currentCampaign.status === 'stopped') {
+        stopped = true;
+        skippedAfterStop = recipients.length - started;
+        break;
       }
+
+      if (campaign.type === 'voice') {
+        await sendVoiceCall(recipient, campaign);
+      } else {
+        await sendSms(recipient, campaign);
+      }
+
+      started += 1;
     }
-    res.json({ started: recipients.length });
+
+    return res.json({
+      campaignId: Number(campaignId),
+      totalPending: recipients.length,
+      started,
+      skippedAfterStop,
+      stopped,
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('POST /api/campaigns/:id/start error', err);
+    return res.status(500).json({ error: err.message });
   }
 });
 

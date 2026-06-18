@@ -1,188 +1,255 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { exportCsv, getStatus, startCampaign } from '../api';
-import UploadRecipients from './UploadRecipients';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { exportCsv, getStatus, startCampaign, stopCampaign, uploadRecipients } from '../api';
 
-function getResponseData(response) {
-  return response && response.data ? response.data : response;
+function getCampaignStatus(campaign) {
+  return campaign?.status || 'draft';
 }
 
-function statusClass(status) {
-  const value = String(status || '').toLowerCase();
-  if (['completed', 'sent'].includes(value)) return 'status-good';
-  if (['failed', 'failed_permanent', 'busy', 'no-answer', 'cancelled', 'canceled'].includes(value)) return 'status-bad';
-  if (['retry', 'pending'].includes(value)) return 'status-warn';
-  return 'status-neutral';
+function statusTone(status) {
+  const normalized = String(status || '').toLowerCase();
+  if (['completed', 'sent'].includes(normalized)) return 'success';
+  if (['running', 'pending', 'retry'].includes(normalized)) return 'warning';
+  if (['failed', 'failed_permanent', 'cancelled', 'stopped'].includes(normalized)) return 'danger';
+  return 'neutral';
 }
 
-function compactDetail(value) {
-  if (!value) return 'No detail yet';
-  try {
-    const parsed = JSON.parse(value);
-    return parsed.message || parsed.error || parsed.CallStatus || JSON.stringify(parsed);
-  } catch (error) {
-    return String(value);
-  }
+function StatusPill({ status }) {
+  const value = status || 'unknown';
+  return <span className={`status-pill status-${statusTone(value)}`}>{value}</span>;
 }
 
-export default function CampaignView({ token, id }) {
-  const [status, setStatus] = useState(null);
+export default function CampaignView({ campaignId, authToken, onBack }) {
+  const [data, setData] = useState(null);
+  const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [msg, setMsg] = useState(null);
+  const [uploading, setUploading] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
 
-  async function load() {
+  const loadStatus = useCallback(async () => {
+    if (!campaignId) return;
+
     setLoading(true);
-    setMsg(null);
+    setError('');
+
     try {
-      const response = await getStatus(token, id);
-      setStatus(getResponseData(response));
-    } catch (error) {
-      setMsg({ type: 'error', text: error?.response?.data?.error || error.message || 'Failed to load campaign.' });
+      const res = await getStatus(campaignId, authToken);
+      setData(res.data);
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message || 'Failed to load campaign');
     } finally {
       setLoading(false);
     }
-  }
+  }, [campaignId, authToken]);
 
   useEffect(() => {
-    if (id) load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+    loadStatus();
+  }, [loadStatus]);
+
+  const campaign = data?.campaign;
+  const recipients = data?.recipients || [];
+  const campaignStatus = getCampaignStatus(campaign);
+  const isStopped = campaignStatus === 'stopped';
+
+  const stats = useMemo(() => {
+    const total = recipients.length;
+    const completed = recipients.filter((r) => ['completed', 'sent'].includes(r.status)).length;
+    const retry = recipients.filter((r) => r.status === 'retry').length;
+    const cancelled = recipients.filter((r) => ['cancelled', 'stopped'].includes(r.status)).length;
+    const failed = recipients.filter((r) => ['failed', 'failed_permanent'].includes(r.status)).length;
+
+    return { total, completed, retry, cancelled, failed };
+  }, [recipients]);
+
+  async function handleUpload() {
+    if (!file) {
+      setError('Choose a CSV file first. Even software likes receiving the actual file.');
+      return;
+    }
+
+    setUploading(true);
+    setError('');
+    setMessage('');
+
+    try {
+      const res = await uploadRecipients(campaignId, file, authToken);
+      setMessage(`Inserted ${res.data.inserted || 0} recipient(s).`);
+      setFile(null);
+      await loadStatus();
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message || 'Upload failed');
+    } finally {
+      setUploading(false);
+    }
+  }
 
   async function handleStart() {
-    setMsg(null);
+    if (isStopped) {
+      setError('This campaign is stopped. Create a new campaign for another run.');
+      return;
+    }
+
     setStarting(true);
+    setError('');
+    setMessage('');
+
     try {
-      const response = await startCampaign(token, id);
-      const data = getResponseData(response);
-      setMsg({ type: 'success', text: `Started ${data.started || 0} pending recipient(s). Refreshing status...` });
-      setTimeout(load, 1200);
-    } catch (error) {
-      setMsg({ type: 'error', text: error?.response?.data?.error || error.message || 'Start campaign failed.' });
+      const res = await startCampaign(campaignId, authToken);
+      setMessage(`Started ${res.data.started || 0} recipient(s).`);
+      await loadStatus();
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message || 'Start campaign failed');
     } finally {
       setStarting(false);
     }
   }
 
-  async function handleExport() {
+  async function handleStop() {
+    const confirmed = window.confirm(
+      'Stop this campaign now? Pending and retry recipients will be cancelled. Already dialed calls may still complete.'
+    );
+
+    if (!confirmed) return;
+
+    setStopping(true);
+    setError('');
+    setMessage('');
+
     try {
-      const response = await exportCsv(token, id);
-      const blob = response && response.data ? response.data : response;
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `campaign_${id}.csv`;
-      a.click();
-      window.URL.revokeObjectURL(url);
-    } catch (error) {
-      setMsg({ type: 'error', text: error?.response?.data?.error || error.message || 'Export failed.' });
+      const res = await stopCampaign(campaignId, authToken);
+      setMessage(`Campaign stopped. Cancelled ${res.data.cancelledRecipients || 0} pending/retry recipient(s).`);
+      await loadStatus();
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message || 'Stop campaign failed');
+    } finally {
+      setStopping(false);
     }
   }
 
-  const recipients = status?.recipients || [];
-  const stats = useMemo(() => {
-    const total = recipients.length;
-    const completed = recipients.filter((r) => ['completed', 'sent'].includes(String(r.status).toLowerCase())).length;
-    const retry = recipients.filter((r) => String(r.status).toLowerCase() === 'retry').length;
-    const failed = recipients.filter((r) => String(r.status).toLowerCase().includes('failed')).length;
-    return { total, completed, retry, failed };
-  }, [recipients]);
+  async function handleExport() {
+    setError('');
 
-  const retryDetails = recipients.filter((r) => String(r.status).toLowerCase() === 'retry' || r.last_status_detail);
+    try {
+      const res = await exportCsv(campaignId, authToken);
+      const blob = new Blob([res.data], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `campaign_${campaignId}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err?.response?.data?.error || err.message || 'Export failed');
+    }
+  }
 
   return (
-    <div className="campaign-view-grid">
-      <div className="premium-card span-main">
-        <div className="view-title-row">
-          <div>
-            <div className="card-kicker">Campaign #{id}</div>
-            <h3>{status?.campaign?.name || 'Campaign details'}</h3>
-            <p className="muted">Start calls, refresh status, and inspect Plivo error details.</p>
+    <main className="page-shell">
+      <section className="hero-panel compact-hero">
+        <div>
+          <p className="eyebrow">Campaign #{campaignId}</p>
+          <h1>{campaign?.name || 'Campaign Details'}</h1>
+          <p>Upload recipients, start outbound calls, stop pending work, and read status diagnostics without guessing like it is 1998.</p>
+        </div>
+        <div className="hero-actions">
+          {campaign && <StatusPill status={campaignStatus} />}
+          {onBack && (
+            <button className="button button-secondary" onClick={onBack}>Back</button>
+          )}
+        </div>
+      </section>
+
+      <section className="content-grid campaign-detail-grid">
+        <div className="premium-card wide-card">
+          <div className="card-heading-row">
+            <div>
+              <p className="eyebrow red">Recipients</p>
+              <h2>Campaign control</h2>
+              <p className="muted">CSV format: one phone number per row. For Plivo, prefer E.164 format like +918056593498.</p>
+            </div>
+            <div className="action-row wrap-actions">
+              <button className="button button-secondary" onClick={loadStatus} disabled={loading}>Refresh</button>
+              <button className="button button-primary" onClick={handleStart} disabled={starting || isStopped || recipients.length === 0}>
+                {starting ? 'Starting...' : 'Start Campaign'}
+              </button>
+              <button className="button button-danger" onClick={handleStop} disabled={stopping || isStopped}>
+                {stopping ? 'Stopping...' : 'Stop Campaign'}
+              </button>
+              <button className="button button-secondary" onClick={handleExport} disabled={recipients.length === 0}>Export CSV</button>
+            </div>
           </div>
-          <div className="action-row">
-            <button className="primary-button" type="button" onClick={handleStart} disabled={starting || recipients.length === 0}>
-              {starting ? 'Starting...' : 'Start Campaign'}
+
+          <div className="upload-panel">
+            <input type="file" accept=".csv" onChange={(event) => setFile(event.target.files?.[0] || null)} />
+            <button className="button button-primary" onClick={handleUpload} disabled={uploading || !file}>
+              {uploading ? 'Uploading...' : 'Upload CSV'}
             </button>
-            <button className="secondary-button" type="button" onClick={handleExport}>Export CSV</button>
-            <button className="secondary-button" type="button" onClick={load}>Refresh</button>
           </div>
-        </div>
 
-        {msg && <div className={`alert ${msg.type === 'success' ? 'success-alert' : 'error-alert'}`}>{msg.text}</div>}
-        {loading && <div className="inline-note">Loading campaign status...</div>}
+          {message && <div className="alert alert-success">{message}</div>}
+          {error && <div className="alert alert-danger">{error}</div>}
 
-        <div className="stats-grid">
-          <div className="stat-card"><span>Total</span><strong>{stats.total}</strong></div>
-          <div className="stat-card"><span>Sent / Completed</span><strong>{stats.completed}</strong></div>
-          <div className="stat-card"><span>Retry</span><strong>{stats.retry}</strong></div>
-          <div className="stat-card"><span>Failed</span><strong>{stats.failed}</strong></div>
-        </div>
-
-        {status?.campaign && (
-          <div className="campaign-summary">
-            <div><span>Type</span><strong>{status.campaign.type}</strong></div>
-            <div><span>Retry delay</span><strong>{status.campaign.retry_delay_minutes} min</strong></div>
-            <div><span>Max attempts</span><strong>{status.campaign.max_attempts}</strong></div>
-            <div><span>Created</span><strong>{status.campaign.created_at || '-'}</strong></div>
+          <div className="stats-row">
+            <div className="stat-card"><span>Total</span><strong>{stats.total}</strong></div>
+            <div className="stat-card"><span>Completed/Sent</span><strong>{stats.completed}</strong></div>
+            <div className="stat-card"><span>Retry</span><strong>{stats.retry}</strong></div>
+            <div className="stat-card"><span>Cancelled</span><strong>{stats.cancelled}</strong></div>
+            <div className="stat-card"><span>Failed</span><strong>{stats.failed}</strong></div>
           </div>
-        )}
-      </div>
 
-      <div className="premium-card span-side">
-        <UploadRecipients token={token} campaignId={id} onUploaded={load} />
-      </div>
-
-      {retryDetails.length > 0 && (
-        <div className="premium-card span-full troubleshooting-card">
-          <div className="card-kicker">Call troubleshooting</div>
-          <h3>Why the call may not be ringing</h3>
-          <p className="muted">Rows in retry usually mean the backend tried to start a Plivo call but Plivo rejected it or the webhook marked it for retry. Check the detail column below and Render logs.</p>
-          <ul className="check-list">
-            <li>Use E.164 format: <strong>+91XXXXXXXXXX</strong>, not only 91XXXXXXXXXX.</li>
-            <li>Confirm Render has real <strong>PLIVO_AUTH_ID</strong>, <strong>PLIVO_AUTH_TOKEN</strong>, and <strong>PLIVO_SOURCE_NUMBER</strong>.</li>
-            <li>Confirm your Plivo source/caller ID is valid for outbound voice.</li>
-            <li>Use a public HTTPS MP3 URL or a text message fallback.</li>
-          </ul>
-        </div>
-      )}
-
-      <div className="premium-card span-full">
-        <div className="table-header">
-          <div>
-            <div className="card-kicker">Recipient status</div>
-            <h3>Delivery table</h3>
-          </div>
-          <button className="secondary-button" type="button" onClick={load}>Refresh</button>
-        </div>
-
-        {recipients.length === 0 ? (
-          <div className="empty-state">No recipients uploaded yet. Upload a CSV to begin.</div>
-        ) : (
-          <div className="table-wrap">
-            <table className="premium-table">
-              <thead>
-                <tr>
-                  <th>Phone</th>
-                  <th>Status</th>
-                  <th>Attempts</th>
-                  <th>Last Attempt</th>
-                  <th>Detail</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recipients.map((recipient) => (
-                  <tr key={recipient.id}>
-                    <td className="phone-cell">{recipient.phone_number}</td>
-                    <td><span className={`status-pill ${statusClass(recipient.status)}`}>{recipient.status || 'pending'}</span></td>
-                    <td>{recipient.attempts || 0}</td>
-                    <td>{recipient.last_attempt_at || '-'}</td>
-                    <td className="detail-cell" title={recipient.last_status_detail || ''}>{compactDetail(recipient.last_status_detail)}</td>
+          {loading ? (
+            <div className="loading-card">Loading campaign...</div>
+          ) : recipients.length === 0 ? (
+            <div className="empty-card">No recipients uploaded yet.</div>
+          ) : (
+            <div className="table-wrap">
+              <table className="premium-table">
+                <thead>
+                  <tr>
+                    <th>Phone</th>
+                    <th>Status</th>
+                    <th>Attempts</th>
+                    <th>Last Attempt</th>
+                    <th>Detail</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {recipients.map((recipient) => (
+                    <tr key={recipient.id || recipient.phone_number}>
+                      <td className="mono-cell">{recipient.phone_number}</td>
+                      <td><StatusPill status={recipient.status} /></td>
+                      <td>{recipient.attempts ?? 0}</td>
+                      <td>{recipient.last_attempt_at || '-'}</td>
+                      <td className="detail-cell">{recipient.last_status_detail || '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <aside className="premium-card side-card">
+          <p className="eyebrow red">Summary</p>
+          <h2>Campaign</h2>
+          <div className="summary-list">
+            <div><span>Name</span><strong>{campaign?.name || '-'}</strong></div>
+            <div><span>Type</span><strong>{campaign?.type || '-'}</strong></div>
+            <div><span>Status</span><strong>{campaignStatus}</strong></div>
+            <div><span>Max attempts</span><strong>{campaign?.max_attempts || '-'}</strong></div>
+            <div><span>Retry delay</span><strong>{campaign?.retry_delay_minutes || '-'} min</strong></div>
           </div>
-        )}
-      </div>
-    </div>
+
+          <div className="tip-card warning-tip">
+            <strong>What Stop Campaign does</strong>
+            <p>It cancels pending and retry rows so the worker will not dial them later. Already-started Plivo calls may still finish because telephony refuses to obey dramatic button clicks instantly.</p>
+          </div>
+        </aside>
+      </section>
+    </main>
   );
 }
